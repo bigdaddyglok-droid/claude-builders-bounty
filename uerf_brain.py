@@ -2501,11 +2501,14 @@ class UERFExperience:
         teach_s = self.s[self.t_start:self.t_end]
         return teach_s.norm(dim=-1)
 
-    def eval_predict(self, x, n_relax=None, bond_chunk=256):
+    def eval_predict(self, x, n_relax=None, bond_chunk=256,
+                     return_scores=False):
         """
         Non-destructive evaluation. Save ALL state, run inference, restore.
         fix5: default n_relax 10 instead of 6 (more ticks for bonds to drive
         teach slots from zero). Explicit n_relax arg always overrides.
+        return_scores: return the full per-class score vector instead of
+        the argmax index (None if there are no teach slots).
         """
         if n_relax is None:
             n_relax = 10 if self.fixes.get('fix5') else 6
@@ -2603,7 +2606,15 @@ class UERFExperience:
             if val is not None:
                 setattr(self, attr, val)
 
+        if return_scores:
+            return scores.clone() if scores is not None else None
         return result
+
+    def predict_scores(self, x, n_relax=None, bond_chunk=256):
+        """Non-destructive evaluation returning the full per-class score
+        vector (teach-slot magnitudes) rather than the argmax index."""
+        return self.eval_predict(x, n_relax=n_relax, bond_chunk=bond_chunk,
+                                 return_scores=True)
 
 
 # Attach experience methods
