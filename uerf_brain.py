@@ -541,9 +541,13 @@ class UERFField:
         S_CLASSICAL, S_TOROIDAL, S_CUBIT, S_QUANTUM, S_QUBIT,
         S_PHANTOM, S_TEMPORAL, S_RELATIVISTIC, S_HARMONIC,
         S_VACUUM, S_FRACTAL, S_RETROCAUSAL, S_ELEMENTAL,
-        S_HOLOGRAPHIC, S_HOLOADS, S_THERMAL, S_MULTIVERSAL,
+        S_HOLOGRAPHIC, S_THERMAL, S_MULTIVERSAL,
         S_CONSCIOUSNESS,
     ]
+    # S_HOLOADS (id 14) is excluded from routing — it is not one of the 17 doc
+    # states (14 canonical + 3 speculative). Its code branches remain intact so
+    # any checkpointed oscillators in that state still compute correct physics;
+    # subsequent routing ticks will migrate them to Holographic naturally.
 
     def __init__(self, n_max=200, n_initial=100, d=32, input_dim=None,
                  n_classes=None, device=None):
@@ -649,17 +653,26 @@ class UERFField:
         self._prev_mag = None
 
         # ── Cross-state coupling matrix (for Unified Master Equation)
+        # Pairs from the doc's Cross-State Coupling section + one defensible extra.
+        # No integer-adjacency coupling — state IDs are arbitrary, so i±1 has no
+        # physical meaning.
         n_states = N_STATE_SLOTS
-        self.C_states = torch.eye(n_states, device=dev) * 0.0
-        # Neighboring states couple weakly
-        for i in range(n_states - 1):
-            self.C_states[i, i+1] = 0.02
-            self.C_states[i+1, i] = 0.02
-        # Strong couplings between complementary states
-        self.C_states[S_PHANTOM, S_HOLOGRAPHIC] = 0.05
-        self.C_states[S_HOLOGRAPHIC, S_PHANTOM] = 0.05
-        self.C_states[S_THERMAL, S_VACUUM] = 0.03
-        self.C_states[S_VACUUM, S_THERMAL] = 0.03
+        self.C_states = torch.zeros(n_states, n_states, device=dev)
+        _COUPLINGS = [
+            # Doc-specified hybrids
+            (S_QUANTUM,     S_RELATIVISTIC, 0.05),  # Dirac eq in curved spacetime
+            (S_THERMAL,     S_FRACTAL,      0.03),  # heat diffusion on fractal geometry
+            (S_HARMONIC,    S_TOROIDAL,     0.05),  # tokamak plasma resonances
+            (S_HOLOGRAPHIC, S_ELEMENTAL,    0.03),  # AdS/CFT + gauge theory coupling
+            (S_PHANTOM,     S_VACUUM,       0.05),  # dark energy from quantum fluctuations
+            (S_TEMPORAL,    S_THERMAL,      0.03),  # non-equilibrium thermodynamics
+            (S_FRACTAL,     S_HARMONIC,     0.03),  # multi-scale resonance structures
+            # Physically defensible extra (not in doc)
+            (S_PHANTOM,     S_HOLOGRAPHIC,  0.05),  # phantom growth → holographic consolidation
+        ]
+        for _a, _b, _w in _COUPLINGS:
+            self.C_states[_a, _b] = _w
+            self.C_states[_b, _a] = _w
 
         self.state_weights = torch.ones(n_states, device=dev) / n_states
 
@@ -1148,7 +1161,7 @@ class UERFDynamics:
         uniform_share = 1.0 / n_states_active
         prev_pop_w = torch.zeros(n_states_active, device=self.device)
         for k, sid in enumerate(self.CANDIDATE_STATES):
-            if sid < 20:
+            if sid < N_STATE_SLOTS:
                 prev_pop_w[k] = self.state_weights[sid].item()
         excess = (prev_pop_w - uniform_share).clamp(min=0)  # (n_states,)
         # Penalty strength tuned to roughly cancel a 50% population state's
@@ -1218,7 +1231,7 @@ class UERFDynamics:
         if n_int_total > 0:
             # Count locked osc by their assigned state (which is preserved)
             for sid in self.CANDIDATE_STATES:
-                if sid < 20:
+                if sid < N_STATE_SLOTS:
                     locked_in_state = ((self.state_id == sid) &
                                         interior & self._class_locked).sum().float()
                     state_weights[sid] = locked_in_state / n_int_total
@@ -1227,7 +1240,7 @@ class UERFDynamics:
                 n_routable = soft_probs.shape[0]
                 routable_probs = soft_probs.sum(dim=0) / n_int_total
                 for k, sid in enumerate(self.CANDIDATE_STATES):
-                    if sid < 20:
+                    if sid < N_STATE_SLOTS:
                         state_weights[sid] = state_weights[sid] + routable_probs[k]
         self.state_weights = state_weights
 
@@ -1400,6 +1413,12 @@ class UERFDynamics:
             # Regular oscillators use full sensory drive norm
             P_in = torch.where(teach_mask, P_in_teach, P_in)
 
+            # Consciousness Eq 2: P_in*(1+γ_attention*A(t)) for attended oscillators
+            A_att = ctx.get('A', 0.5)
+            A_val = float(A_att.item() if isinstance(A_att, torch.Tensor) else A_att)
+            consciousness_mask = (self.state_id == S_CONSCIOUSNESS) & ~teach_mask
+            P_in = torch.where(consciousness_mask, P_in * (1.0 + 0.5 * A_val), P_in)
+
             # Teaching slots need a base alpha (moderate retention).
             _teach_alpha = 0.5 if self.fixes.get('fix2') else 0.3
             alpha = torch.where(teach_mask,
@@ -1512,9 +1531,6 @@ class UERFDynamics:
                 beta = (v_full / scale).clamp(0.0, 0.95)
                 self.local_v2c2 = (beta ** 2).clamp(0.0, 0.95)
                 self.gamma = (1.0 / torch.sqrt(1.0 - self.local_v2c2)).clamp(1.0, 3.0)
-            else:
-                self._prev_s = s.clone()
-
             # Proper time accrual with dilation
             dt = 1.0
             activity = (mag > 0.05).float()
@@ -1599,7 +1615,7 @@ class UERFLearning:
         """α for each oscillator under its currently routed state."""
         n = self.n_max
         out = torch.zeros(n, device=self.device)
-        for sid in self.CANDIDATE_STATES + [S_PHANTOM, S_CLASSICAL]:
+        for sid in self.CANDIDATE_STATES:
             m = (self.state_id == sid)
             if not m.any():
                 continue
