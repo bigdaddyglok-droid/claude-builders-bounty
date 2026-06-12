@@ -138,6 +138,18 @@ CONFIG = {
     'ckpt_every'     : 2000,
 }
 
+# Environment overrides for smaller hardware. The defaults above are sized
+# for an A100-80GB (the C bond tensor alone is n_max² × d² × 4 bytes ≈ 30 GB);
+# on a 16 GB GPU like Kaggle's T4 set e.g. UERF_NMAX=800.
+for _key, _env in (('n_max', 'UERF_NMAX'), ('n_initial', 'UERF_NINITIAL'),
+                   ('d', 'UERF_D'),
+                   ('phase1_mnist_steps', 'UERF_P1_STEPS'),
+                   ('phase2_cifar_steps', 'UERF_P2_STEPS'),
+                   ('phase3_ti_steps', 'UERF_P3_STEPS')):
+    if os.environ.get(_env):
+        CONFIG[_key] = int(os.environ[_env])
+        print(f"[config] {_key} = {CONFIG[_key]} (from ${_env})")
+
 # Nominal cumulative experience-count boundaries. Used ONLY as a fallback for
 # resume anchoring when lifetime_log.json has no record of the previous phase.
 # The real anchor is the experience_count logged by 'phase_{N-1}_complete' —
@@ -216,7 +228,8 @@ class UniversalEncoder:
     def __init__(self, device=None):
         import torchvision
         import torchvision.transforms as T
-        self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+        from uerf_brain import DEVICE as _BRAIN_DEVICE
+        self.device = device or _BRAIN_DEVICE
 
         # Load pretrained ResNet-18, strip the classifier
         net = torchvision.models.resnet18(weights='IMAGENET1K_V1')

@@ -56,7 +56,20 @@ import torch.nn.functional as F
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONSTANTS — golden anchors from the framework
 # ═══════════════════════════════════════════════════════════════════════════════
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+def _pick_device():
+    """CUDA must actually work, not just be present — a GPU whose compute
+    capability the installed torch wasn't built for (e.g. P100/sm_60 on
+    modern wheels) passes is_available() but fails on the first kernel."""
+    if torch.cuda.is_available():
+        try:
+            (torch.randn(4, device='cuda') @ torch.randn(4, 4, device='cuda'))
+            torch.cuda.synchronize()
+            return torch.device('cuda')
+        except Exception as e:
+            print(f"[device] CUDA present but unusable ({type(e).__name__}); using CPU")
+    return torch.device('cpu')
+
+DEVICE = _pick_device()
 PHI       = 1.6180339887498948482          # golden ratio  (S_φ)
 PHI_INV   = 0.6180339887498948482
 THETA_G   = 2.3999632297286533             # golden angle (radians) ≈ 137.5°
