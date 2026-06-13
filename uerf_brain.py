@@ -479,12 +479,21 @@ def state_dissipation_modifier(state_id, theta, S, f, N, E, a0,
     return M.clamp(0.01, 3.0)
 
 
-def alpha_for_state(state_id, theta, S, f, N, E, a0, ctx):
+def alpha_for_state(state_id, theta, S, f, N, E, a0, ctx, core_pack=None):
     """
     Full Eq 3 for a given state.
     Core × modifier, mapped into the state's hierarchy band.
+
+    core_pack: optional (core, F_phi, F_vortex, F_369) tuple from a prior
+    alpha_core() call. The core is state-INDEPENDENT (only the modifier and
+    α-band differ per state), so loops that evaluate many states per tick
+    must compute it once and pass it in — recomputing it per state was ~34
+    identical alpha_core() evaluations per dynamics tick.
     """
-    core, F_phi, F_vortex, F_369 = alpha_core(theta, S, f, N, a0)
+    if core_pack is not None:
+        core, F_phi, F_vortex, F_369 = core_pack
+    else:
+        core, F_phi, F_vortex, F_369 = alpha_core(theta, S, f, N, a0)
     mod = state_modifier(state_id, theta, S, f, N, E, a0, ctx)
     raw = core * mod
     # Map into the state's α-range
@@ -735,7 +744,12 @@ class UERFField:
         # ── FIX 3: Crystallization requires sustained high valence
         self._valence_accumulator = torch.zeros(n_max, device=dev)
         self._valence_count = torch.zeros(n_max, device=dev)
-        self._crystallization_threshold = 0.6  # must sustain valence > this
+        # Threshold on the EMA valence (not EMA/count — see crystallized()).
+        # Interior magnitudes sit well below 1 in normal training, so the
+        # sustained-valence band is ~0.1-0.5; 0.25 demands genuinely strong,
+        # persistent alignment without being unreachable like the old 0.6
+        # (which was compared against EMA/count ≈ 0).
+        self._crystallization_threshold = 0.25
 
     # ── Helpers ──
     def energy(self):
@@ -805,8 +819,12 @@ class UERFField:
             (torch.abs(self.theta - THETA_G) < 0.10) &
             (torch.abs(self.S - S_PHI) < 0.10)
         )
-        # Must have accumulated sufficient positive valence
-        mean_valence = self._valence_accumulator / self._valence_count.clamp(min=1)
+        # Must have accumulated sufficient positive valence. The accumulator
+        # is an EMA (0.95/0.05 in _identity_drift) and already IS the running
+        # mean — dividing it by the ever-growing update count drove the value
+        # toward zero within a few steps and made the threshold permanently
+        # unreachable (root cause of locked=0 / crystallized=0 in Phase 1).
+        mean_valence = self._valence_accumulator
         valence_sufficient = mean_valence > self._crystallization_threshold
         return golden_proximity & valence_sufficient & self.alive_mask
 
@@ -932,14 +950,22 @@ class UERFDynamics:
         else:
             ctx['vacuum_stability'] = torch.ones(n, device=self.device) * 0.5
 
-        # Quantum: phase coherence with neighbors
+        # Quantum: phase coherence with neighbors — bounded to the alive
+        # high-water mark (dormant slots have no bonds, so the full n×n
+        # phase-difference matrix wasted O(n_max²) work every routing pass).
         phi = self.phase_angle()
         if self.C_mask.any():
+            alive_idx = self.alive_mask.nonzero(as_tuple=True)[0]
+            n_hi = int(alive_idx.max().item()) + 1 if len(alive_idx) > 0 else 1
+            phi_hi = phi[:n_hi]
             # Mean phase difference with bonded neighbors
-            phase_diff = torch.cos(phi.unsqueeze(0) - phi.unsqueeze(1))
-            bonded_coherence = (phase_diff * self.C_mask.float()).sum(1)
-            n_bonds = self.C_mask.float().sum(1).clamp(min=1)
-            ctx['phase_coherence'] = (bonded_coherence / n_bonds).clamp(0, 1)
+            phase_diff = torch.cos(phi_hi.unsqueeze(0) - phi_hi.unsqueeze(1))
+            mask_hi = self.C_mask[:n_hi, :n_hi].float()
+            bonded_coherence = (phase_diff * mask_hi).sum(1)
+            n_bonds = mask_hi.sum(1).clamp(min=1)
+            coh = torch.zeros(n, device=self.device)
+            coh[:n_hi] = (bonded_coherence / n_bonds).clamp(0, 1)
+            ctx['phase_coherence'] = coh
         else:
             ctx['phase_coherence'] = torch.zeros(n, device=self.device)
 
@@ -1031,10 +1057,15 @@ class UERFDynamics:
         I_k = c * mag.unsqueeze(-1)
         base_dev = ((s - I_k) ** 2).sum(-1)
 
+        # alpha_core is state-independent — compute ONCE for all 17 states
+        # (and reuse below for best_a). Energy too.
+        _core_pack = alpha_core(self.theta, self.S, self.f, self.N, self.a0)
+        _E_now = self.energy()
+
         for k, sid in enumerate(self.CANDIDATE_STATES):
             alpha_k, _, _, _ = alpha_for_state(
                 sid, self.theta, self.S, self.f, self.N,
-                self.energy(), self.a0, ctx
+                _E_now, self.a0, ctx, core_pack=_core_pack
             )
 
             # STATE-SPECIFIC FITNESS SIGNALS
@@ -1225,14 +1256,14 @@ class UERFDynamics:
         else:
             soft_probs = torch.zeros(0, len(self.CANDIDATE_STATES), device=self.device)
 
-        # Get the α for each oscillator's chosen state
+        # Get the α for each oscillator's chosen state (reuse the cached core)
         best_a = torch.zeros(n, device=self.device)
         for k, sid in enumerate(self.CANDIDATE_STATES):
             mask = (self.state_id == sid) & self.alive_mask
             if mask.any():
                 a_k, _, _, _ = alpha_for_state(
                     sid, self.theta, self.S, self.f, self.N,
-                    self.energy(), self.a0, ctx
+                    _E_now, self.a0, ctx, core_pack=_core_pack
                 )
                 best_a = torch.where(mask, a_k, best_a)
 
@@ -1628,12 +1659,16 @@ class UERFLearning:
         """α for each oscillator under its currently routed state."""
         n = self.n_max
         out = torch.zeros(n, device=self.device)
+        # alpha_core is state-independent — one evaluation serves every state
+        core_pack = alpha_core(self.theta, self.S, self.f, self.N, self.a0)
+        E_now = self.energy()
         for sid in self.CANDIDATE_STATES:
             m = (self.state_id == sid)
             if not m.any():
                 continue
             a, _, _, _ = alpha_for_state(sid, self.theta, self.S, self.f,
-                                         self.N, self.energy(), self.a0, ctx)
+                                         self.N, E_now, self.a0, ctx,
+                                         core_pack=core_pack)
             out = torch.where(m, a, out)
         return out
 
@@ -1671,25 +1706,36 @@ class UERFLearning:
             # EXCEPT class-locked osc — their incoming bonds are FROZEN
             # (consolidated class memory). They still PARTICIPATE as senders
             # (their pattern drives other osc), but they no longer learn.
+            #
+            # Bounded to the alive high-water mark n_hi: dormant senders have
+            # s=0 (zero contribution) and dormant receivers are masked out, so
+            # restricting the outer product and the writes to [:n_hi] is
+            # bitwise-identical while skipping the dormant-slot bandwidth.
+            alive_hw = alive.nonzero(as_tuple=True)[0]
+            n_hi = int(alive_hw.max().item()) + 1 if len(alive_hw) > 0 else 1
             receivers = interior & ~self._class_locked
-            for r0 in range(0, n, chunk):
-                r1 = min(r0 + chunk, n)
+            for r0 in range(0, n_hi, chunk):
+                r1 = min(r0 + chunk, n_hi)
                 recv_mask = receivers[r0:r1]
                 if not recv_mask.any():
                     continue
 
                 gv = grad_v[r0:r1]  # (chunk, d)
-                delta_C = torch.einsum('id,je->ijde', gv, s)  # (chunk, n, d, d)
+                delta_C = torch.einsum('id,je->ijde', gv, s[:n_hi])  # (chunk, n_hi, d, d)
 
-                sender_alive = alive.float().unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+                sender_alive = alive[:n_hi].float().unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
                 delta_C = delta_C * sender_alive
 
                 alpha_scale = alpha[r0:r1].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-                self.C[r0:r1] += lr * alpha_scale * delta_C * recv_mask.float().unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-                # Decay bonds. locked rows are always frozen (no decay).
-                # that share a chunk with interior receivers also get decayed,
-                # bleeding teach-slot bonds between Pathway-2 rewrites.
+                self.C[r0:r1, :n_hi] += lr * alpha_scale * delta_C * recv_mask.float().unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+                # Decay bonds. Locked rows are always frozen (no decay), and so
+                # are TEACHING rows: teach slots are not Pathway-1 receivers,
+                # but they share chunks with interior receivers, so the old
+                # blanket decay multiplied the interior→teach readout bonds by
+                # (1-decay) every step — 0.999^10000 ≈ 4.5e-5 — silently
+                # erasing exactly the bonds consolidate_class ranks on.
                 locked_chunk = self._class_locked[r0:r1]
+                teach_chunk = self._is_teaching[r0:r1]
                 if self.fixes.get('fix6'):
                     is_receiver = recv_mask & ~locked_chunk
                     decay_per_row = torch.where(
@@ -1698,10 +1744,10 @@ class UERFLearning:
                         torch.tensor(1.0, device=self.device))   # non-receivers frozen
                 else:
                     decay_per_row = torch.where(
-                        locked_chunk,
-                        torch.tensor(1.0, device=self.device),     # locked: no decay
+                        locked_chunk | teach_chunk,
+                        torch.tensor(1.0, device=self.device),     # locked/teach: no decay
                         torch.tensor(1.0 - decay, device=self.device))
-                self.C[r0:r1] *= decay_per_row.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+                self.C[r0:r1, :n_hi] *= decay_per_row.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
                 del delta_C
 
             # PATHWAY 2: Teaching slots RECEIVE from interior (readout pathway)
@@ -1802,7 +1848,14 @@ class UERFLearning:
             self._prune_bonds()
 
     def _prune_bonds(self):
-        """Prune weak bonds and enforce per-oscillator budget."""
+        """Prune weak bonds and enforce per-oscillator budget.
+
+        Bounded to the alive high-water mark n_hi: all C rows/cols beyond
+        n_hi are exactly zero (dormant slots), so restricting the norm scan,
+        weak-kill, budget rescale, and mask rebuild to [:n_hi, :n_hi] is
+        bitwise-identical but stops reading/writing the full O(n_max²·d²)
+        tensor twice per learning step (the single biggest per-step cost
+        after the bond drive itself)."""
         with torch.no_grad():
             n = self.n_max
             alive = self.alive_mask
@@ -1811,23 +1864,28 @@ class UERFLearning:
             cr = self.crystallized()
             locked = self._class_locked
 
-            # Norm of each bond
-            tn = self.C.norm(dim=(-2, -1))
+            alive_idx = alive.nonzero(as_tuple=True)[0]
+            n_hi = int(alive_idx.max().item()) + 1 if len(alive_idx) > 0 else 1
+            C_hi = self.C[:n_hi, :n_hi]            # view — writes hit self.C
+
+            # Norm of each bond (occupied block only)
+            tn = C_hi.norm(dim=(-2, -1))           # (n_hi, n_hi)
 
             # Kill very weak bonds — EXCEPT bonds touching locked osc
             # (those represent consolidated class memory; never erase them).
             weak = tn < 0.02
-            locked_rows = locked.unsqueeze(1).expand(n, n)
-            locked_cols = locked.unsqueeze(0).expand(n, n)
+            locked_rows = locked[:n_hi].unsqueeze(1).expand(n_hi, n_hi)
+            locked_cols = locked[:n_hi].unsqueeze(0).expand(n_hi, n_hi)
             # Also protect teaching-slot rows from weak pruning so that
             # the readout bonds C[teach_c, sensor] persist even if some
             # individual sensor bonds are below threshold.
-            teach_rows = teach.unsqueeze(1).expand(n, n)
+            teach_rows = teach[:n_hi].unsqueeze(1).expand(n_hi, n_hi)
             weak = weak & ~(locked_rows | locked_cols | teach_rows)
-            self.C[weak] = 0.0
+            C_hi[weak] = 0.0
 
             # Budget: limit total incoming bond strength per oscillator
-            recv_total = tn.sum(dim=1)
+            recv_total = torch.zeros(n, device=self.device)
+            recv_total[:n_hi] = tn.sum(dim=1)
             state_alpha = self._alpha_of_current_state({})
             n_alive = alive.sum().clamp(min=1).float()
             budget_per_osc = 0.5 * state_alpha * n_alive
@@ -1844,11 +1902,12 @@ class UERFLearning:
                 scale_factor = budget_per_osc / recv_total.clamp(min=1e-6)
                 scale_factor = torch.where(over_budget, scale_factor,
                                            torch.ones_like(scale_factor))
-                self.C.mul_(scale_factor.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1))
+                C_hi.mul_(scale_factor[:n_hi].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1))
 
-            # Rebuild mask
-            tn = self.C.norm(dim=(-2, -1))
-            self.C_mask = tn > 0.02
+            # Rebuild mask (rows/cols ≥ n_hi are zero ⇒ mask False, identical)
+            tn = C_hi.norm(dim=(-2, -1))
+            self.C_mask = torch.zeros(n, n, dtype=torch.bool, device=self.device)
+            self.C_mask[:n_hi, :n_hi] = tn > 0.02
             # MASK SEMANTICS: C_mask[i, j] = True means "i receives from j"
             # (because C[i,j] @ s[j] contributes to drive of oscillator i)
             #
@@ -1915,8 +1974,10 @@ class UERFLearning:
             )
             self._valence_count[target] += 1
 
-            # Only drift oscillators with ABOVE-THRESHOLD sustained valence
-            mean_val = self._valence_accumulator / self._valence_count.clamp(min=1)
+            # Only drift oscillators with ABOVE-THRESHOLD sustained valence.
+            # The accumulator is already an EMA-mean — do NOT divide by the
+            # update count (that drove it to ~0 and killed all drift).
+            mean_val = self._valence_accumulator
             high_valence = (mean_val > self._crystallization_threshold * 0.5) & target
 
             if not high_valence.any():
@@ -2074,6 +2135,30 @@ class UERFLearning:
 
             # Bond strength from each interior osc into this class's teach slot
             strengths = self.C[teach_idx].norm(dim=(-2, -1))   # (n_max,)
+
+            # FALLBACK: if no interior→teach bonds exist (checkpoints trained
+            # before the Pathway-1 teach-row decay fix, or fix3 sensor-only
+            # readout), rank by how well each interior identity vector aligns
+            # with this class's mean input signature, reconstructed from the
+            # sensor→teach mean accumulator: _teach_bond_sum[k, j] =
+            # count·outer(c_teach_k, mean_s_j), so c_teach_k @ sum gives
+            # count·mean_s_j, and the class signature is Σ_j mean_s_j.
+            if (float(strengths[interior].max()) < 1e-4
+                    and self._teach_bond_sum is not None
+                    and float(self._teach_bond_count[class_id]) > 0):
+                sensor_idx = self._is_sensory.nonzero(as_tuple=True)[0]
+                if len(sensor_idx) > 0:
+                    cnt = self._teach_bond_count[class_id].clamp(min=1)
+                    c_k = self.c[teach_idx]
+                    mean_s = torch.einsum(
+                        'd,jde->je', c_k,
+                        self._teach_bond_sum[class_id, sensor_idx]) / cnt
+                    sig = mean_s.sum(0)
+                    sig_n = sig.norm().clamp(min=1e-6)
+                    if float(sig_n) > 1e-6:
+                        sig = sig / sig_n
+                        strengths = (self.c * sig.unsqueeze(0)).sum(-1).clamp(min=0)
+
             # Already-locked candidates excluded; also exclude crystallized
             # locked-to-other-class to avoid stealing
             candidates = interior & ~self._class_locked
@@ -2402,15 +2487,18 @@ class UERFExperience:
                     self._competitive_c_learning(input_sig=input_sig, lr_c=_lrc)
 
                 # Phantom birth and emergent growth triggers, calibrated to
-                # match the contradiction signal's real range. After the
-                # contradiction recalibration (removed broken teach_c sub-
-                # signal), normal training contradiction sits at 0.4-0.55.
-                # Severe difficulty pushes it higher.
+                # match the contradiction signal's REAL range: with the current
+                # formula (max of mean-valence term and variance term), a field
+                # that is learning normally sits at ~0.25-0.35; genuine
+                # difficulty (V_mean ≤ 0.2 or valence std > 0.2) pushes it past
+                # 0.40. The old 0.5 trigger only fired when the field was
+                # catastrophically failing, so birth/growth were silently inert
+                # through all of Phase 1.
                 contradiction = self._contradiction()
                 refractory = self.experience_count - self._last_birth_step > 50
 
-                # Phantom birth fires when contradiction > 0.5 (above baseline)
-                if contradiction > 0.5 and refractory:
+                # Phantom birth fires when contradiction > 0.40 (above baseline)
+                if contradiction > 0.40 and refractory:
                     n_spawn = max(1, int(contradiction * 4))   # 2-4 spawns
 
                     # EMERGENT NEUROGENESIS: when the field is full AND
@@ -2425,7 +2513,7 @@ class UERFExperience:
                     grow_refractory = (self.experience_count -
                                        getattr(self, '_last_grow_step', -10000)) > 200
                     # Grow when full AND contradiction is genuinely elevated
-                    if n_dormant == 0 and grow_refractory and contradiction > 0.5:
+                    if n_dormant == 0 and grow_refractory and contradiction > 0.45:
                         # Grow by 20% of current capacity (min 100 slots)
                         n_grow = max(100, int(self.n_max * 0.2))
                         old_n = self.n_max
