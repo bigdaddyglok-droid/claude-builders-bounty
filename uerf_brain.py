@@ -721,6 +721,15 @@ class UERFField:
         }
         self._last_birth_step = -1000
 
+        # ── PERF: sparse bond message-passing ─────────────────────────────
+        # The dense path contracts the full n_hi² oscillator grid through the
+        # (n,n,d,d) C tensor every tick, materializing GB-scale 4-D temporaries
+        # even though ~70% of pairs have no bond. The sparse path iterates only
+        # over active bonds (C_mask edges): bitwise-equivalent output, memory
+        # and compute scale with |bonds| instead of n_hi². Critical once the
+        # population grows (Phase 2/3). Toggle off to recover the dense path.
+        self._sparse_bonds = True
+
         # ── Per-class teaching bond TRUE-MEAN accumulators
         # Stores Σ outer(c_teach, s_sensor) per class; final bond = sum/count.
         # Phase B class learning NEVER touches Phase A class accumulators
@@ -1317,13 +1326,6 @@ class UERFDynamics:
         n_hi = int(alive_idx.max().item()) + 1 if len(alive_idx) > 0 else 1
 
         n = self.n_max
-        cosd = self.phase_vec[:n_hi] @ self.phase_vec[:n_hi].T
-        gate_full = (1.0 + cosd) * 0.5 * self.C_mask[:n_hi, :n_hi].float()
-
-        sens = self._is_sensory[:n_hi]
-        sens_f = sens.float().unsqueeze(0)
-        recur_f = (~sens).float().unsqueeze(0)
-
         out_sens = torch.zeros(n, self.d, device=self.device)
         out_recur = torch.zeros(n, self.d, device=self.device)
 
@@ -1336,16 +1338,42 @@ class UERFDynamics:
         # interior oscillators (in alpha_for_state / valence computation),
         # but NOT for the readout pathway. Sensor→teach bond drive must pass
         # through unchanged for class discrimination to work.
-        for r0 in range(0, n_hi, chunk):
-            r1 = min(r0 + chunk, n_hi)
-            tr = torch.einsum('ijde,je->ijd', self.C[r0:r1, :n_hi], self.s[:n_hi])
-            gated = tr * gate_full[r0:r1].unsqueeze(-1)
-            drive_s = (gated * sens_f.unsqueeze(-1)).sum(1)
-            drive_r = (gated * recur_f.unsqueeze(-1)).sum(1)
 
-            out_sens[r0:r1] = drive_s
-            out_recur[r0:r1] = drive_r
-            del tr, gated, drive_s, drive_r
+        if getattr(self, '_sparse_bonds', True):
+            # SPARSE PATH: gate_full already multiplies by C_mask, so only
+            # bonded (i,j) pairs ever contribute. Iterate the edge list
+            # directly — O(|bonds|·d²) memory/compute, no GB-scale 4-D
+            # intermediate. Bitwise-equivalent to the dense path below.
+            edges = self.C_mask[:n_hi, :n_hi].nonzero(as_tuple=False)
+            if edges.numel() > 0:
+                i_idx = edges[:, 0]
+                j_idx = edges[:, 1]
+                C_e = self.C[i_idx, j_idx]                       # (E, d, d)
+                s_j = self.s[j_idx]                              # (E, d)
+                tr_e = torch.einsum('edf,ef->ed', C_e, s_j)      # (E, d)
+                # gate = (1 + cos(phase_i, phase_j)) * 0.5   (C_mask already 1)
+                cos_e = (self.phase_vec[i_idx] * self.phase_vec[j_idx]).sum(-1)
+                gate_e = ((1.0 + cos_e) * 0.5).unsqueeze(-1)
+                gated_e = tr_e * gate_e                          # (E, d)
+                sender_sens = self._is_sensory[j_idx]
+                out_sens.index_add_(0, i_idx[sender_sens], gated_e[sender_sens])
+                out_recur.index_add_(0, i_idx[~sender_sens], gated_e[~sender_sens])
+        else:
+            # DENSE PATH (reference): full n_hi² grid through (n,n,d,d) C.
+            cosd = self.phase_vec[:n_hi] @ self.phase_vec[:n_hi].T
+            gate_full = (1.0 + cosd) * 0.5 * self.C_mask[:n_hi, :n_hi].float()
+            sens = self._is_sensory[:n_hi]
+            sens_f = sens.float().unsqueeze(0)
+            recur_f = (~sens).float().unsqueeze(0)
+            for r0 in range(0, n_hi, chunk):
+                r1 = min(r0 + chunk, n_hi)
+                tr = torch.einsum('ijde,je->ijd', self.C[r0:r1, :n_hi], self.s[:n_hi])
+                gated = tr * gate_full[r0:r1].unsqueeze(-1)
+                drive_s = (gated * sens_f.unsqueeze(-1)).sum(1)
+                drive_r = (gated * recur_f.unsqueeze(-1)).sum(1)
+                out_sens[r0:r1] = drive_s
+                out_recur[r0:r1] = drive_r
+                del tr, gated, drive_s, drive_r
 
         if split:
             return out_sens, out_recur
