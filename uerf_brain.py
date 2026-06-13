@@ -969,7 +969,7 @@ class UERFDynamics:
         else:
             ctx['phase_coherence'] = torch.zeros(n, device=self.device)
 
-        # Multiversal: best branch alignment
+        # Multiversal: branch alignment, weighted by learned branch reliability
         if self.s_branches.abs().sum() > 0:
             # Which branch best predicts current state?
             branch_aligns = torch.zeros(n, 4, device=self.device)
@@ -978,7 +978,18 @@ class UERFDynamics:
                 sb_norm = sb.norm(dim=-1).clamp(min=1e-8)
                 branch_aligns[:, j] = (sb * s).sum(-1) / (sb_norm * mag.clamp(min=1e-8))
             best_branch = branch_aligns.max(dim=-1).values
-            ctx['branch_gain'] = (0.95 + 0.1 * best_branch).clamp(0.9, 1.1)
+            # branch_weights is the softmax-EMA reliability of each parallel
+            # branch (rows sum to ~1), updated every tick in
+            # _update_state_variables. Previously it was computed and then
+            # discarded — the Multiversal regime ignored its own learned
+            # weighting and used only the single best branch. Fold it in as a
+            # convex-combination amplitude so high-reliability branches that
+            # agree with the current state drive the gain (the framework's
+            # cross-branch transfer Σ_j w_j·alignment_j), blended with the
+            # best-branch term to retain the original exploration signal.
+            weighted_align = (branch_aligns * self.branch_weights).sum(-1)
+            combined = 0.5 * best_branch + 0.5 * weighted_align
+            ctx['branch_gain'] = (0.95 + 0.1 * combined).clamp(0.9, 1.1)
         else:
             ctx['branch_gain'] = torch.ones(n, device=self.device)
 
