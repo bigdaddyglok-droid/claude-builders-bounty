@@ -1711,7 +1711,7 @@ class UERFLearning:
             out = torch.where(m, a, out)
         return out
 
-    def _learn_bonds(self, lr=0.08, decay=1e-3, lam=0.25, chunk=128):
+    def _learn_bonds(self, lr=0.08, decay=1e-3, lam=0.25, chunk=32):
         """
         VALENCE-ASCENT BOND UPDATE.
         ΔC[i,j] ∝ α_i · (R_i − λ(s_i−I_i)) ⊗ s_j  (outer product)
