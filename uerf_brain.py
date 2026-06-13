@@ -1753,68 +1753,41 @@ class UERFLearning:
             alive_hw = alive.nonzero(as_tuple=True)[0]
             n_hi = int(alive_hw.max().item()) + 1 if len(alive_hw) > 0 else 1
             receivers = interior & ~self._class_locked
+            for r0 in range(0, n_hi, chunk):
+                r1 = min(r0 + chunk, n_hi)
+                recv_mask = receivers[r0:r1]
+                if not recv_mask.any():
+                    continue
 
-            if getattr(self, '_sparse_bonds', True):
-                # SPARSE PATH: compute outer product only for actual (receiver,
-                # alive-sender) pairs — skips locked/teach/dormant rows/cols
-                # that the dense chunked loop touched unnecessarily.
-                # Memory: O(n_recv × n_send × d²) vs O(n_hi² × d²).
-                recv_idx = receivers[:n_hi].nonzero(as_tuple=True)[0]  # global ids
-                send_idx = alive[:n_hi].nonzero(as_tuple=True)[0]      # alive senders only
-                if len(recv_idx) > 0 and len(send_idx) > 0:
-                    gv_r = grad_v[recv_idx]           # (n_recv, d)
-                    a_r  = alpha[recv_idx]             # (n_recv,)
-                    s_s  = s[send_idx]                 # (n_send, d)
-                    for r0 in range(0, len(recv_idx), chunk):
-                        r1 = min(r0 + chunk, len(recv_idx))
-                        r_chunk = recv_idx[r0:r1]          # global receiver indices
-                        delta = torch.einsum('id,je->ijde',
-                                             gv_r[r0:r1], s_s)  # (chunk_r, n_send, d, d)
-                        delta_scaled = (lr * a_r[r0:r1].view(-1, 1, 1, 1) * delta)
-                        # Advanced indexing: write to (r_chunk × send_idx) grid
-                        r2d = r_chunk.unsqueeze(1).expand(-1, len(send_idx))
-                        j2d = send_idx.unsqueeze(0).expand(len(r_chunk), -1)
-                        self.C[r2d.flatten(), j2d.flatten()] += delta_scaled.view(-1, d, d)
-                        # Decay only the alive-sender bond positions (zeros stay zero)
-                        self.C[r2d.flatten(), j2d.flatten()] *= (1.0 - decay)
-                        del delta, delta_scaled, r2d, j2d
-            else:
-                # DENSE PATH (reference): full n_hi² grid.
-                for r0 in range(0, n_hi, chunk):
-                    r1 = min(r0 + chunk, n_hi)
-                    recv_mask = receivers[r0:r1]
-                    if not recv_mask.any():
-                        continue
+                gv = grad_v[r0:r1]  # (chunk, d)
+                delta_C = torch.einsum('id,je->ijde', gv, s[:n_hi])  # (chunk, n_hi, d, d)
 
-                    gv = grad_v[r0:r1]  # (chunk, d)
-                    delta_C = torch.einsum('id,je->ijde', gv, s[:n_hi])  # (chunk, n_hi, d, d)
+                sender_alive = alive[:n_hi].float().unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+                delta_C = delta_C * sender_alive
 
-                    sender_alive = alive[:n_hi].float().unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
-                    delta_C = delta_C * sender_alive
-
-                    alpha_scale = alpha[r0:r1].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-                    self.C[r0:r1, :n_hi] += lr * alpha_scale * delta_C * recv_mask.float().unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-                    # Decay bonds. Locked rows are always frozen (no decay), and so
-                    # are TEACHING rows: teach slots are not Pathway-1 receivers,
-                    # but they share chunks with interior receivers, so the old
-                    # blanket decay multiplied the interior→teach readout bonds by
-                    # (1-decay) every step — 0.999^10000 ≈ 4.5e-5 — silently
-                    # erasing exactly the bonds consolidate_class ranks on.
-                    locked_chunk = self._class_locked[r0:r1]
-                    teach_chunk = self._is_teaching[r0:r1]
-                    if self.fixes.get('fix6'):
-                        is_receiver = recv_mask & ~locked_chunk
-                        decay_per_row = torch.where(
-                            is_receiver,
-                            torch.tensor(1.0 - decay, device=self.device),
-                            torch.tensor(1.0, device=self.device))   # non-receivers frozen
-                    else:
-                        decay_per_row = torch.where(
-                            locked_chunk | teach_chunk,
-                            torch.tensor(1.0, device=self.device),     # locked/teach: no decay
-                            torch.tensor(1.0 - decay, device=self.device))
-                    self.C[r0:r1, :n_hi] *= decay_per_row.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-                    del delta_C
+                alpha_scale = alpha[r0:r1].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+                self.C[r0:r1, :n_hi] += lr * alpha_scale * delta_C * recv_mask.float().unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+                # Decay bonds. Locked rows are always frozen (no decay), and so
+                # are TEACHING rows: teach slots are not Pathway-1 receivers,
+                # but they share chunks with interior receivers, so the old
+                # blanket decay multiplied the interior→teach readout bonds by
+                # (1-decay) every step — 0.999^10000 ≈ 4.5e-5 — silently
+                # erasing exactly the bonds consolidate_class ranks on.
+                locked_chunk = self._class_locked[r0:r1]
+                teach_chunk = self._is_teaching[r0:r1]
+                if self.fixes.get('fix6'):
+                    is_receiver = recv_mask & ~locked_chunk
+                    decay_per_row = torch.where(
+                        is_receiver,
+                        torch.tensor(1.0 - decay, device=self.device),
+                        torch.tensor(1.0, device=self.device))   # non-receivers frozen
+                else:
+                    decay_per_row = torch.where(
+                        locked_chunk | teach_chunk,
+                        torch.tensor(1.0, device=self.device),     # locked/teach: no decay
+                        torch.tensor(1.0 - decay, device=self.device))
+                self.C[r0:r1, :n_hi] *= decay_per_row.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+                del delta_C
 
             # PATHWAY 2: Teaching slots RECEIVE from interior (readout pathway)
             # CONTRASTIVE LEARNING:
