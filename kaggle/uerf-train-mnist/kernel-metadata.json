@@ -1,0 +1,14 @@
+{
+  "id": "blackloko/uerf-train-mnist-from-scratch-uerf-train-py",
+  "title": "UERF Train — MNIST from scratch (uerf_train.py)",
+  "code_file": "uerf_train_mnist.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}
