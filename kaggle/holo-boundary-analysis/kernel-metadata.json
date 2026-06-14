@@ -1,0 +1,14 @@
+{
+  "id": "blackloko/uerf-holographic-boundary-analysis",
+  "title": "UERF HOLOGRAPHIC Boundary Analysis",
+  "code_file": "uerf_holo_boundary.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": ["blackloko/uerf-phase1-emergent-complete-ckpt"],
+  "competition_sources": [],
+  "kernel_sources": []
+}
