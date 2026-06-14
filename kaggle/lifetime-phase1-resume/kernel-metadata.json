@@ -8,9 +8,9 @@
   "enable_gpu": true,
   "enable_tpu": false,
   "enable_internet": true,
-  "dataset_sources": [],
+  "dataset_sources": [
+    "blackloko/uerf-phase1-ckpt-step6000"
+  ],
   "competition_sources": [],
-  "kernel_sources": [
-    "blackloko/uerf-lifetime-gauntlet-phase-1-mnist"
-  ]
+  "kernel_sources": []
 }
