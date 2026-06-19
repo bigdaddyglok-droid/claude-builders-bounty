@@ -20,7 +20,7 @@ app = modal.App("uerf-phase4", image=image)
 HF_DATASET = "BlackLoks/uerf-checkpoints"
 
 
-@app.function(gpu="A10G", timeout=3600, memory=46080, cpu=8.0)
+@app.function(gpu="A10G", timeout=7200, memory=46080, cpu=8.0)
 def run_phase4(hf_token: str):
     import os, sys, time, json, shutil
     from huggingface_hub import hf_hub_download, HfApi
