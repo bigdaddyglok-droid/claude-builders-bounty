@@ -2512,6 +2512,85 @@ class UERFExperience:
         """Same as predict but returns raw scores."""
         return self.predict()
 
+    def fit_teach_templates(self, xs, ys, n_relax=None, domain_lo=None, domain_hi=None):
+        """
+        Labeled calibration pass: for each (input, label) pair, capture the
+        teach-slot state after eval relaxation and accumulate per-class means.
+        Stores self._teach_templates: (n_classes, d) unit-normalized tensor.
+
+        domain_lo / domain_hi: if set, only accumulate stats for the slot range
+        [domain_lo:domain_hi] (e.g. slots 0-9 for MNIST). Labels must be global
+        slot indices (i.e. already offset: MNIST y, CIFAR y+10, TI y+110).
+        """
+        if self.t_start is None:
+            return
+        sums   = torch.zeros(self.n_classes, self.d, device=self.device)
+        counts = torch.zeros(self.n_classes, device=self.device)
+        for x, y in zip(xs, ys):
+            holder = {}
+            orig = self.predict
+            def _probe(_orig=orig):
+                holder['tv'] = self.s[self.t_start:self.t_end].clone()
+                return _orig()
+            self.predict = _probe
+            self.eval_predict(x, n_relax=n_relax)
+            self.predict = orig
+            if 'tv' not in holder:
+                continue
+            y_int = int(y)
+            if 0 <= y_int < self.n_classes:
+                if domain_lo is not None and not (domain_lo <= y_int < domain_hi):
+                    continue
+                sums[y_int]   += holder['tv'][y_int]
+                counts[y_int] += 1
+        mask = counts > 0
+        self._teach_templates = sums.clone()
+        self._teach_templates[mask] = (sums[mask] /
+                                       counts[mask].unsqueeze(-1).clamp(min=1e-8))
+        norms = self._teach_templates.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        self._teach_templates = self._teach_templates / norms
+        n_fit = int(mask.sum())
+        print(f"[fit_teach_templates] {n_fit}/{self.n_classes} class templates fitted", flush=True)
+        return n_fit
+
+    def predict_template(self, domain_lo=None, domain_hi=None):
+        """
+        Nearest-prototype readout using stored teach templates.
+        Compare current teach-slot states (full d-dim) against per-class
+        templates with cosine similarity — 32x more signal than scalar norm.
+        Optional domain masking restricts argmax to slots [domain_lo:domain_hi].
+        Falls back to predict() if templates haven't been fitted.
+        """
+        if self.t_start is None:
+            return self.predict()
+        if not hasattr(self, '_teach_templates') or self._teach_templates is None:
+            return self.predict()
+        tv   = self.s[self.t_start:self.t_end]                          # (n_cls, d)
+        tv_n = tv / tv.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        sims = (tv_n * self._teach_templates).sum(-1)                    # (n_cls,)
+        if domain_lo is not None and domain_hi is not None:
+            mask = torch.zeros(self.n_classes, dtype=torch.bool, device=self.device)
+            mask[domain_lo:domain_hi] = True
+            sims = sims.masked_fill(~mask, -1e9)
+        return sims
+
+    def eval_predict_template(self, x, n_relax=None, domain_lo=None, domain_hi=None):
+        """Non-destructive eval using the template-based nearest-prototype readout."""
+        if self.t_start is None:
+            return -1
+        holder = {}
+        orig = self.predict
+        def _tmpl_predict(_orig=orig):
+            sims = self.predict_template(domain_lo=domain_lo, domain_hi=domain_hi)
+            holder['sims'] = sims.clone() if sims is not None else None
+            return _orig()
+        self.predict = _tmpl_predict
+        self.eval_predict(x, n_relax=n_relax)
+        self.predict = orig
+        if holder.get('sims') is not None:
+            return int(holder['sims'].argmax())
+        return -1
+
     def eval_predict(self, x, n_relax=None, bond_chunk=256, return_scores=False):
         """
         Non-destructive evaluation. Save ALL state, run inference, restore.
@@ -2621,7 +2700,9 @@ class UERFExperience:
 
 
 # Attach experience methods
-for _m in ('experience', '_rehearse', 'predict', 'predict_scores', 'eval_predict', 'calibrate_readout'):
+for _m in ('experience', '_rehearse', 'predict', 'predict_scores', 'eval_predict',
+           'calibrate_readout', 'fit_teach_templates', 'predict_template',
+           'eval_predict_template'):
     setattr(UERFField, _m, getattr(UERFExperience, _m))
 
 
