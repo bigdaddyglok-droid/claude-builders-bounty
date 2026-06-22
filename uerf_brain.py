@@ -662,18 +662,10 @@ class UERFField:
 
         self.state_weights = torch.ones(n_states, device=dev) / n_states
 
-        # ── Replay buffer for continual learning — STRATIFIED PER CLASS
-        # Old FIFO buffer caused catastrophic forgetting: by step 750 of
-        # Phase B, buffer was 100% Phase B samples, rehearsal reinforced
-        # only Phase B. Now: per-class deque, keep N samples per class,
-        # rehearsal samples uniformly across all classes seen.
-        self._replay_per_class = {}            # dict[int, list of (x, tv)]
-        self._replay_capacity_per_class = 20
-        # DISABLE FLAG: when True, replay buffer doesn't accumulate samples
-        # and rehearsal is skipped. Required for clean physics-only continual
-        # learning test — without it, the patent claim is "physics + replay"
-        # not "physics alone."
-        self._replay_disabled = False
+        # ── Replay/rehearsal has been removed entirely. The brain defends
+        # memory with physics alone (crystallization + locking + disjoint
+        # per-class teach-bond accumulators) — no stored training examples,
+        # no rehearsal.
 
         # ── ABLATION TOGGLES ──────────────────────────────────────────────
         # Each of the 6 audit fixes is independently switchable so we can run
@@ -2461,71 +2453,9 @@ class UERFExperience:
                 if self.experience_count % 50 == 0:
                     self._age_and_cull()
 
-                # STRATIFIED REPLAY BUFFER (per-class FIFO)
-                # Previously FIFO across all classes → buffer became 100%
-                # Phase B by step ~750, rehearsal then reinforced ONLY Phase B
-                # and erased Phase A. Now: per-class deque of last N samples.
-                # Phase B's class buckets fill independently of Phase A's.
-                # Rehearsal samples uniformly across populated buckets.
-                #
-                # If _replay_disabled, skip accumulation entirely — physics
-                # must defend memory alone, no replay assistance.
-                if (teaching_vector is not None and self.n_classes is not None
-                        and not self._replay_disabled):
-                    class_id = int(teaching_vector.argmax())
-                    if class_id not in self._replay_per_class:
-                        self._replay_per_class[class_id] = []
-                    self._replay_per_class[class_id].append(
-                        (x.clone(), teaching_vector.clone()))
-                    if len(self._replay_per_class[class_id]) > self._replay_capacity_per_class:
-                        self._replay_per_class[class_id].pop(0)
-
-                # Rehearsal every 10 steps (replays prior class samples)
-                # Also skipped when _replay_disabled.
-                if not self._replay_disabled:
-                    total_replays = sum(len(v) for v in self._replay_per_class.values())
-                    if self.experience_count % 10 == 0 and total_replays > 5:
-                        self._rehearse()
-
-    def _rehearse(self, n_replay=6):
-        """
-        Replay stored patterns from the STRATIFIED per-class buffer to
-        consolidate memory across all classes seen so far. Each rehearsal
-        samples uniformly across classes, ensuring Phase A classes get
-        rehearsed during Phase B (the fix for catastrophic forgetting).
-        """
-        with torch.no_grad():
-            if not self._replay_per_class:
-                return
-            # Flatten all class buffers
-            all_examples = []
-            for buf in self._replay_per_class.values():
-                all_examples.extend(buf)
-            if len(all_examples) < 2:
-                return
-
-            n = min(n_replay, len(all_examples))
-            indices = torch.randperm(len(all_examples))[:n].tolist()
-            for idx in indices:
-                x_rep, tv_rep = all_examples[idx]
-
-                if self.input_dim is not None:
-                    self.s[:self.input_dim] = x_rep.unsqueeze(-1) * self.c[:self.input_dim]
-
-                pin_teach = None
-                if tv_rep is not None and self.t_start is not None:
-                    pin_teach = tv_rep.unsqueeze(-1) * self.c[self.t_start:self.t_end]
-
-                pin_s = self.s[:self.input_dim].clone() if self.input_dim else None
-                ctx = self._build_routing_ctx()
-
-                # Slightly more ticks for replay (consolidation should be deep)
-                for _ in range(4):
-                    self._dynamics_step(ctx, pin_sensory=pin_s,
-                                        pin_teaching=pin_teach)
-
-                # Full learning rate (consolidation reinforces strongly)
-                self._learn_bonds(lr=0.08, decay=1e-4)
+                # (replay buffer + rehearsal removed — physics defends memory
+                #  alone via crystallization, locking, and disjoint per-class
+                #  teach-bond accumulators)
 
     def predict(self):
         """Read out teaching-slot magnitudes as class scores. If the readout
@@ -2676,10 +2606,8 @@ class UERFExperience:
     def build_self_catalog(self, n_relax=None, extra_xs=None, extra_ys=None):
         """Build per-class full-field prototypes the brain reads itself by.
 
-        Primary source is the brain's OWN replay memory (self._replay_per_class),
-        so the catalog is built from examples the brain itself chose to remember.
-        Optional extra_xs/extra_ys (already class-offset labels) augment it when
-        a wider calibration is wanted. Stores self._field_catalog:
+        Built from explicit calibration examples (extra_xs/extra_ys, already
+        class-offset labels). Stores self._field_catalog:
         (n_classes, n_classes*d) unit-normalized; classes with no memory stay 0.
         """
         if self.t_start is None:
@@ -2688,19 +2616,6 @@ class UERFExperience:
         sums   = torch.zeros(self.n_classes, D, device=self.device)
         counts = torch.zeros(self.n_classes, device=self.device)
 
-        # the brain's own remembered examples
-        was_disabled = getattr(self, '_replay_disabled', False)
-        self._replay_disabled = True   # never write replay while reading it
-        for cls_id, buf in self._replay_per_class.items():
-            if not (0 <= cls_id < self.n_classes):
-                continue
-            for x, _tv in buf:
-                f = self._capture_teach_field(x.to(self.device), n_relax=n_relax)
-                if f is not None:
-                    sums[cls_id] += f
-                    counts[cls_id] += 1
-
-        # optional wider calibration
         if extra_xs is not None and extra_ys is not None:
             for x, y in zip(extra_xs, extra_ys):
                 y = int(y)
@@ -2710,7 +2625,6 @@ class UERFExperience:
                 if f is not None:
                     sums[y] += f
                     counts[y] += 1
-        self._replay_disabled = was_disabled
 
         mask = counts > 0
         proto = torch.zeros_like(sums)
@@ -2719,7 +2633,7 @@ class UERFExperience:
         self._field_catalog = proto / norms
         n_fit = int(mask.sum())
         print(f"[build_self_catalog] {n_fit}/{self.n_classes} class prototypes "
-              f"from {int(counts.sum())} remembered examples", flush=True)
+              f"from {int(counts.sum())} calibration examples", flush=True)
         return n_fit
 
     def predict_native(self, domain_lo=None, domain_hi=None):
@@ -2865,7 +2779,7 @@ class UERFExperience:
 
 
 # Attach experience methods
-for _m in ('experience', '_rehearse', 'predict', 'predict_scores', 'eval_predict',
+for _m in ('experience', 'predict', 'predict_scores', 'eval_predict',
            'calibrate_readout', 'fit_teach_templates', 'predict_template',
            'eval_predict_template', '_capture_teach_field', 'build_self_catalog',
            'predict_native', 'eval_predict_native'):
@@ -2927,11 +2841,7 @@ class UERFCheckpoint:
                 ckpt[attr] = v.detach().cpu().clone()
             else:
                 ckpt[attr] = v
-        # Save stratified replay buffer
-        replay_data = {}
-        for cls_id, buf in self._replay_per_class.items():
-            replay_data[cls_id] = [(x.cpu(), t.cpu()) for x, t in buf]
-        ckpt['_replay_per_class'] = replay_data
+        # (no replay buffer to save — physics-only memory)
         # Save teach bond accumulators
         if self._teach_bond_sum is not None:
             ckpt['_teach_bond_sum'] = self._teach_bond_sum.detach().cpu().clone()
@@ -2963,18 +2873,8 @@ class UERFCheckpoint:
                 setattr(f, attr, v.to(dev))
             elif v is not None:
                 setattr(f, attr, v)
-        # Restore stratified replay buffer
-        if '_replay_per_class' in ckpt and ckpt['_replay_per_class']:
-            f._replay_per_class = {}
-            for cls_id, buf in ckpt['_replay_per_class'].items():
-                f._replay_per_class[cls_id] = [(x.to(dev), t.to(dev)) for x, t in buf]
-        elif '_replay_inputs' in ckpt and ckpt['_replay_inputs']:
-            # Backwards compat: old FIFO checkpoint — distribute into classes
-            for x, t in ckpt['_replay_inputs']:
-                cls_id = int(t.argmax())
-                if cls_id not in f._replay_per_class:
-                    f._replay_per_class[cls_id] = []
-                f._replay_per_class[cls_id].append((x.to(dev), t.to(dev)))
+        # (replay buffer removed — any legacy '_replay_per_class' in an old
+        #  checkpoint is intentionally ignored)
         # Restore teach bond accumulators
         if '_teach_bond_sum' in ckpt and ckpt['_teach_bond_sum'] is not None:
             f._teach_bond_sum = ckpt['_teach_bond_sum'].to(dev)
