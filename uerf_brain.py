@@ -2264,7 +2264,7 @@ class UERFLearning:
         mean_v   = float(vi.mean())
         vi_std   = float(vi.std())
         mean_c   = float((1.0 - vi.mean().clamp(-1, 1)) / 2.0)
-        var_c    = float((vi_std * 2.0).clamp(0, 1))
+        var_c    = min(1.0, vi_std * 2.0)
         contradiction = max(mean_c, var_c)
 
         # --- ACh: sensory novelty (independent) + internal contradiction ---
