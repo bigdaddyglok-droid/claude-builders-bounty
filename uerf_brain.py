@@ -710,6 +710,11 @@ class UERFField:
         self._valence_count = torch.zeros(n_max, device=dev)
         self._crystallization_threshold = 0.6  # must sustain valence > this
 
+        # ── Neuromodulation (all 1.0 = identity; disabled by default)
+        self.neuro_enabled = False
+        self._neuro = {'ach': 1.0, 'da': 1.0, 'na': 1.0, 'sero': 1.0}
+        self._mean_valence_prev = 0.0
+
     # ── Helpers ──
     def energy(self):
         return (self.s ** 2).sum(-1)
@@ -766,6 +771,8 @@ class UERFField:
         )
 
         exponent = (LAMBDA0 * M_state * dt / denom).clamp(max=exponent_cap)
+        _sero = self._neuro.get('sero', 1.0)
+        exponent = exponent / _sero  # sero>1 → less dissipation → longer memory; 1.0=identity
         return torch.sqrt(torch.exp(-exponent))
 
     def crystallized(self):
@@ -780,7 +787,10 @@ class UERFField:
         )
         # Must have accumulated sufficient positive valence
         mean_valence = self._valence_accumulator / self._valence_count.clamp(min=1)
-        valence_sufficient = mean_valence > self._crystallization_threshold
+        _ach = self._neuro.get('ach', 1.0)
+        _sero = self._neuro.get('sero', 1.0)
+        _thresh = max(0.3, min(0.85, self._crystallization_threshold * (2.0 - _ach) / _sero))
+        valence_sufficient = mean_valence > _thresh  # ach/sero=1.0 → thresh=0.6 (identity)
         return golden_proximity & valence_sufficient & self.alive_mask
 
     def report(self):
@@ -1166,7 +1176,8 @@ class UERFDynamics:
             mean_mag = torch.tensor(1.0, device=self.device)
         # Temperature: high when mean_mag is low, low when mean_mag is high
         temperature = 0.5 / (1.0 + 5.0 * mean_mag)  # range: ~0.5 → ~0.05
-        temperature = max(temperature.item(), 0.02)  # floor
+        _na = self._neuro.get('na', 1.0)
+        temperature = max(temperature.item() * _na, 0.02)  # NA scales temp; 1.0=identity
 
         # Add per-oscillator noise for exploration (Gumbel-max trick).
         dV_int = delta_V[routable]  # (n_routable, n_states) — locked excluded
@@ -1638,22 +1649,24 @@ class UERFLearning:
                 delta_C = delta_C * sender_alive
 
                 alpha_scale = alpha[r0:r1].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-                self.C[r0:r1] += lr * alpha_scale * delta_C * recv_mask.float().unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+                _ach_da = self._neuro.get('ach', 1.0) * self._neuro.get('da', 1.0)
+                self.C[r0:r1] += lr * _ach_da * alpha_scale * delta_C * recv_mask.float().unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
                 # Decay bonds. locked rows are always frozen (no decay).
                 # that share a chunk with interior receivers also get decayed,
                 # bleeding teach-slot bonds between Pathway-2 rewrites.
                 locked_chunk = self._class_locked[r0:r1]
+                _ach_d = self._neuro.get('ach', 1.0)  # higher ACh → less decay
                 if self.fixes.get('fix6'):
                     is_receiver = recv_mask & ~locked_chunk
                     decay_per_row = torch.where(
                         is_receiver,
-                        torch.tensor(1.0 - decay, device=self.device),
+                        torch.tensor(1.0 - decay / _ach_d, device=self.device),
                         torch.tensor(1.0, device=self.device))   # non-receivers frozen
                 else:
                     decay_per_row = torch.where(
                         locked_chunk,
                         torch.tensor(1.0, device=self.device),     # locked: no decay
-                        torch.tensor(1.0 - decay, device=self.device))
+                        torch.tensor(1.0 - decay / _ach_d, device=self.device))
                 self.C[r0:r1] *= decay_per_row.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
                 del delta_C
 
@@ -2233,12 +2246,49 @@ class UERFLearning:
 
             return new_n
 
+    def _update_neuromodulators(self):
+        """Update neuromodulator levels from the brain's own signals each tick.
+        When neuro_enabled=False (default), returns immediately — all levels stay 1.0."""
+        if not self.neuro_enabled:
+            return
+
+        V, _ = self._valence_per_osc()
+        interior = self.alive_mask & ~self._is_sensory & ~self._is_teaching
+        if int(interior.sum()) < 3:
+            return
+        vi = V[interior]
+
+        mean_v = float(vi.mean())
+        mean_c = float((1.0 - vi.mean().clamp(-1, 1)) / 2.0)
+        var_c  = float((vi.std() * 2.0).clamp(0, 1))
+        contradiction = max(mean_c, var_c)
+
+        # Acetylcholine — high contradiction → more plastic (LR↑, decay↓, birth↓ threshold)
+        ach_target = 1.0 + 0.5 * math.tanh((contradiction - 0.45) * 4)
+        self._neuro['ach'] = float(max(0.5, min(1.5,
+            0.9 * self._neuro['ach'] + 0.1 * ach_target)))
+
+        # Dopamine — positive Δvalence → reinforce (LR boost); derivative→0 at plateau
+        delta_v = mean_v - self._mean_valence_prev
+        self._mean_valence_prev = mean_v
+        self._neuro['da'] = float(max(0.7, min(1.3,
+            1.0 + 0.3 * math.tanh(delta_v * 10))))
+
+        # Noradrenaline — high valence variance → higher routing temperature (explore)
+        self._neuro['na'] = float(max(0.5, min(2.0,
+            1.0 + 0.5 * math.tanh((float(vi.std()) - 0.2) * 5))))
+
+        # Serotonin — sustained low contradiction → less dissipation, easier crystallize
+        sero_target = 1.0 + 0.4 * max(0.0, math.tanh((0.45 - contradiction) * 5))
+        self._neuro['sero'] = float(max(1.0, min(1.4,
+            0.98 * self._neuro['sero'] + 0.02 * sero_target)))
+
 
 # Attach learning methods
 for _m in ('_valence_per_osc', '_alpha_of_current_state', '_learn_bonds',
            '_prune_bonds', '_identity_drift', '_competitive_c_learning',
            '_contradiction', '_phantom_birth', '_age_and_cull',
-           'consolidate_class', 'grow_capacity'):
+           'consolidate_class', 'grow_capacity', '_update_neuromodulators'):
     setattr(UERFField, _m, getattr(UERFLearning, _m))
 
 
@@ -2366,6 +2416,9 @@ class UERFExperience:
                     _lrc = 0.001 if self.fixes.get('fix4') else 0.005
                     self._competitive_c_learning(input_sig=input_sig, lr_c=_lrc)
 
+                # Update neuromodulators from the brain's current field state
+                self._update_neuromodulators()
+
                 # Phantom birth and emergent growth triggers, calibrated to
                 # match the contradiction signal's real range. After the
                 # contradiction recalibration (removed broken teach_c sub-
@@ -2375,7 +2428,9 @@ class UERFExperience:
                 refractory = self.experience_count - self._last_birth_step > 50
 
                 # Phantom birth fires when contradiction > 0.5 (above baseline)
-                if contradiction > 0.5 and refractory:
+                # ACh modulates threshold: high ACh → lower threshold → birth fires more
+                _ach_birth = self._neuro.get('ach', 1.0)
+                if contradiction > 0.5 / _ach_birth and refractory:
                     n_spawn = max(1, int(contradiction * 4))   # 2-4 spawns
 
                     # EMERGENT NEUROGENESIS: when the field is full AND
@@ -2390,7 +2445,7 @@ class UERFExperience:
                     grow_refractory = (self.experience_count -
                                        getattr(self, '_last_grow_step', -10000)) > 200
                     # Grow when full AND contradiction is genuinely elevated
-                    if n_dormant == 0 and grow_refractory and contradiction > 0.5:
+                    if n_dormant == 0 and grow_refractory and contradiction > 0.5 / _ach_birth:
                         # Grow by 20% of current capacity (min 100 slots)
                         n_grow = max(100, int(self.n_max * 0.2))
                         old_n = self.n_max
@@ -2744,6 +2799,8 @@ class UERFCheckpoint:
         '_valence_accumulator', '_valence_count',
         '_crystallization_threshold',
         '_teach_bond_count',
+        # neuromodulation
+        'neuro_enabled', '_neuro', '_mean_valence_prev',
     )
 
     def save_checkpoint(self, path):
