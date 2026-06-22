@@ -28,9 +28,20 @@ app = modal.App("uerf-whitened-readout", image=image)
 HF_DATASET = "BlackLoks/uerf-checkpoints"
 
 
+# task -> (domain_lo, domain_hi, loader_name, label_offset)
+TASKS = {
+    "mnist": (0, 10, "load_mnist", 0),
+    "cifar": (10, 110, "load_cifar100", 10),
+    "ti":    (110, 310, "load_tiny_imagenet", 110),
+}
+
+
 @app.function(gpu="A100-40GB", timeout=7200, memory=80000, cpu=8.0)
 def run(hf_token: str, source: dict, n_eval: int = 2000,
-        domain=(0, 10), kaggle_user: str = "", kaggle_key: str = "") -> dict:
+        domain=(0, 10), task: str = "mnist",
+        kaggle_user: str = "", kaggle_key: str = "") -> dict:
+    if task in TASKS:
+        domain = (TASKS[task][0], TASKS[task][1])
     """source = {'kind':'hf','file':'phase3_main.pt'}  or
                 {'kind':'kaggle','ds':'blackloko/uerf-phase1-complete-ckpt',
                  'file':'lifetime_main.pt'}"""
@@ -135,13 +146,18 @@ def run(hf_token: str, source: dict, n_eval: int = 2000,
     out["n_sensory_cfg"] = n_sens
     out["input_dim_matches_cfg"] = (n_sens == field.input_dim)
     proj = U.SensoryProjection(512, n_sens, seed=42); proj.to(dev)
-    _, te = L.load_mnist()
+    loader_name, offset = TASKS[task][2], TASKS[task][3]
+    out["task"] = task; out["label_offset"] = offset
+    _, te = getattr(L, loader_name)()
+    # random balanced-ish sample so all classes in the domain are represented
+    g = torch.Generator().manual_seed(0)
+    idxs = torch.randperm(len(te), generator=g)[:min(n_eval, len(te))].tolist()
     X, ys = [], []
-    for i in range(min(n_eval, len(te))):
+    for i in idxs:
         img, lbl = te[i]
         x = proj(encoder.encode(img.unsqueeze(0))[0])
         x = x / x.norm().clamp(min=1e-6)
-        X.append(x); ys.append(int(lbl))
+        X.append(x); ys.append(int(lbl) + offset)    # brain-class = dataset-label + offset
     X = torch.stack(X, 0)                             # (N, D)
     ys = np.array(ys); out["n_eval"] = len(ys)
 
@@ -215,6 +231,44 @@ SOURCES = [
     {"kind": "hf", "file": "pl1done_main.pt", "label": "hf/pl1done_main"},
     {"kind": "hf", "file": "phase3_main.pt", "label": "hf/phase3_main"},
 ]
+
+
+def main_domains():
+    """Run the whitened readout across MNIST / CIFAR-100 / TinyImageNet on the
+    checkpoints that actually learned each domain."""
+    import os, json
+    tok = os.environ["HF_READ_TOKEN"]
+    jobs = [
+        ({"kind": "hf", "file": "phase3_main.pt", "label": "phase3_main"}, "mnist"),
+        ({"kind": "hf", "file": "phase3_main.pt", "label": "phase3_main"}, "cifar"),
+        ({"kind": "hf", "file": "phase3_main.pt", "label": "phase3_main"}, "ti"),
+        ({"kind": "hf", "file": "phase2_main.pt", "label": "phase2_main"}, "cifar"),
+    ]
+    allres = {}
+    for src, task in jobs:
+        key = f"{src['label']}/{task}"
+        print(f"\n{'='*60}\nWHITENED READOUT — {key}\n{'='*60}", flush=True)
+        try:
+            r = run.remote(tok, src, task=task)
+        except Exception as e:
+            r = {"label": key, "error": str(e)[:500]}
+        print(json.dumps(r, indent=2), flush=True)
+        allres[key] = r
+    print("\n" + "#"*64, flush=True)
+    print(f"{'checkpoint/domain':24} {'classes':>7} {'chance':>7} "
+          f"{'native':>7} {'recon':>7} {'whiten':>7}", flush=True)
+    for key, r in allres.items():
+        if "error" in r:
+            print(f"{key:24} ERROR: {r['error'][:50]}", flush=True); continue
+        lo, hi = r["domain"]; nc = hi - lo
+        print(f"{key:24} {nc:7} {100.0/nc:6.2f}% "
+              f"{r.get('brain_predict_masked',0):7} "
+              f"{r.get('reconstructed_matched_filter',0):7} "
+              f"{r.get('best_whitened',0):7}", flush=True)
+    with open("whitened_domains.json", "w") as f:
+        json.dump(allres, f, indent=2)
+    print("\n[saved] whitened_domains.json", flush=True)
+    return allres
 
 
 def main_kaggle():
