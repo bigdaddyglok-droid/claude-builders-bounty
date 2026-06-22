@@ -1,0 +1,27 @@
+{
+  "ckpt": "phase3_main.pt",
+  "domain": [0, 10],
+  "n_max": 800,
+  "input_dim": 128,
+  "n_classes": 310,
+  "exp": 80000,
+  "classes_with_memory": 10,
+  "n_eval": 2000,
+  "brain_predict_full310": 38.5,
+  "brain_predict_masked": 38.75,
+  "reconstructed_matched_filter": 74.4,
+  "whitened_mahalanobis": {
+    "ridge_0.001": 82.95,
+    "ridge_0.01": 83.2,
+    "ridge_0.1": 84.9,
+    "ridge_0.5": 85.55
+  },
+  "best_whitened": 85.55,
+  "probe_ceiling_reference": 86.6,
+  "notes": [
+    "mu_k recovered directly from brain's own _teach_bond_sum accumulators (no labels).",
+    "Reconstructed matched filter (74.4%) >> native predict (38.75%): the physics readout pathway (phase gating, 8-step settling, clamp(min=0) on drive, 310-slot field interference) loses ~36 points of signal that is present in the stored means.",
+    "Whitening the same stored means by the global unsupervised sensory covariance lifts 74.4% -> 85.55%, matching the supervised probe ceiling. One fixed transform applied to all classes equally: no labels, no forgetting risk.",
+    "Verdict: the checkpoint's memory holds ~85% of MNIST class structure. The 38% native readout under-reads its own memory; it is not missing knowledge."
+  ]
+}
