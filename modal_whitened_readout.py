@@ -84,6 +84,13 @@ def run(hf_token: str, source: dict, n_eval: int = 2000,
     out = {"label": label, "domain": [LO, HI],
            "n_max": field.n_max, "input_dim": int(field.input_dim),
            "n_classes": field.n_classes, "exp": int(field.experience_count)}
+    # ── integrity audit: which switches were live when these means formed? ─────
+    out["fixes"] = {k: bool(v) for k, v in getattr(field, "fixes", {}).items()}
+    out["neuro_enabled"] = bool(getattr(field, "neuro_enabled", False))
+    out["neuro_levels"] = {k: float(v) for k, v in getattr(field, "_neuro", {}).items()}
+    rpc = getattr(field, "_replay_per_class", {}) or {}
+    out["replay_entries"] = int(sum(len(v) for v in rpc.values()))
+    out["replay_disabled_for_eval"] = True  # we force-disable below; never read replay
 
     # ── 1. Recover the brain's OWN stored class means mu_k (input_dim-dim) ──────
     # Sensor->teach bond  C[t0+k, j] = outer(c_k, mu_kj * c_j)   (mu_kj = class-k
@@ -214,13 +221,18 @@ def main(sources=None):
         print(json.dumps(r, indent=2), flush=True)
         allres[lab] = r
     print("\n" + "#"*60 + "\nSUMMARY\n" + "#"*60, flush=True)
-    print(f"{'checkpoint':32} {'native':>7} {'recon':>7} {'whiten':>7}", flush=True)
+    print(f"{'checkpoint':30} {'native':>6} {'recon':>6} {'whiten':>6} "
+          f"{'replay':>6} {'neuro':>6} fixes_on", flush=True)
     for lab, r in allres.items():
         if "error" in r:
-            print(f"{lab:32} ERROR: {r['error'][:60]}", flush=True); continue
-        print(f"{lab:32} {r.get('brain_predict_masked',0):7} "
-              f"{r.get('reconstructed_matched_filter',0):7} "
-              f"{r.get('best_whitened',0):7}", flush=True)
+            print(f"{lab:30} ERROR: {r['error'][:60]}", flush=True); continue
+        on = [k for k, v in r.get("fixes", {}).items() if v]
+        print(f"{lab:30} {r.get('brain_predict_masked',0):6} "
+              f"{r.get('reconstructed_matched_filter',0):6} "
+              f"{r.get('best_whitened',0):6} "
+              f"{r.get('replay_entries',0):6} "
+              f"{('ON' if r.get('neuro_enabled') else 'off'):>6} "
+              f"{','.join(on) if on else '-'}", flush=True)
     with open("whitened_readout_all.json", "w") as f:
         json.dump(allres, f, indent=2)
     print("\n[saved] whitened_readout_all.json", flush=True)
