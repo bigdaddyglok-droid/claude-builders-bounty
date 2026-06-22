@@ -22,12 +22,13 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install("torch==2.4.0", "torchvision==0.19.0", "numpy",
                  "huggingface_hub", "pillow", "kaggle")
+    .env({"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
 )
 app = modal.App("uerf-whitened-readout", image=image)
 HF_DATASET = "BlackLoks/uerf-checkpoints"
 
 
-@app.function(gpu="A10G", timeout=7200, memory=80000, cpu=8.0)
+@app.function(gpu="A100-40GB", timeout=7200, memory=80000, cpu=8.0)
 def run(hf_token: str, source: dict, n_eval: int = 2000,
         domain=(0, 10), kaggle_user: str = "", kaggle_key: str = "") -> dict:
     """source = {'kind':'hf','file':'phase3_main.pt'}  or
@@ -178,6 +179,10 @@ def run(hf_token: str, source: dict, n_eval: int = 2000,
         results[f"ridge_{ridge:g}"] = acc(pred_w)
     out["whitened_mahalanobis"] = results
     out["best_whitened"] = max(results.values())
+    # release GPU memory so a reused warm container doesn't accumulate/fragment
+    import gc
+    del field, X, Xc, Sigma, Winv, mu
+    gc.collect(); torch.cuda.empty_cache()
     return out
 
 
