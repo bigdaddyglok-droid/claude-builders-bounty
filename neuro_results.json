@@ -1,0 +1,64 @@
+{
+  "neuro_off": {
+    "neuro_enabled": false,
+    "n_train_steps": 0,
+    "acc_before": 53.1,
+    "acc_after": 53.1,
+    "neuro_levels_final": {
+      "ach": 1.0,
+      "da": 1.0,
+      "na": 1.0,
+      "sero": 1.0
+    },
+    "neuro_trace": []
+  },
+  "neuro_on_train": {
+    "neuro_enabled": true,
+    "n_train_steps": 1000,
+    "acc_before": 53.1,
+    "acc_after": 52.9,
+    "neuro_levels_final": {
+      "ach": 1.4819,
+      "da": 1.0101,
+      "na": 1.0685,
+      "sero": 1.0131
+    },
+    "neuro_trace": [
+      {
+        "step": 200,
+        "ach": 1.4733,
+        "da": 1.0004,
+        "na": 1.0069,
+        "sero": 1.1
+      },
+      {
+        "step": 400,
+        "ach": 1.4759,
+        "da": 1.008,
+        "na": 1.0249,
+        "sero": 1.0683
+      },
+      {
+        "step": 600,
+        "ach": 1.4791,
+        "da": 1.0062,
+        "na": 1.049,
+        "sero": 1.0451
+      },
+      {
+        "step": 800,
+        "ach": 1.4792,
+        "da": 1.0113,
+        "na": 1.051,
+        "sero": 1.035
+      },
+      {
+        "step": 1000,
+        "ach": 1.4819,
+        "da": 1.0101,
+        "na": 1.0685,
+        "sero": 1.0131
+      }
+    ]
+  }
+}
