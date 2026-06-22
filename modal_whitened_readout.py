@@ -50,6 +50,13 @@ def run(hf_token: str, source: dict, n_eval: int = 2000,
     label = source.get("label", source.get("file", "ckpt"))
     if source["kind"] == "hf":
         ckpt_path = grab_hf(source["file"])
+    elif source["kind"] == "hf_zip":
+        # a Kaggle dataset zip relayed onto HF; extract one member
+        import zipfile
+        zp = grab_hf(source["file"])
+        with zipfile.ZipFile(zp) as z:
+            z.extract(source["member"], ws)
+        ckpt_path = os.path.join(ws, source["member"])
     else:  # kaggle dataset
         os.environ["KAGGLE_USERNAME"] = kaggle_user
         os.environ["KAGGLE_KEY"] = kaggle_key
@@ -188,17 +195,18 @@ def run(hf_token: str, source: dict, n_eval: int = 2000,
 
 # Every checkpoint: HF (lifetime) + Kaggle (Phase-1 MNIST snapshots)
 SOURCES = [
-    # Kaggle — Phase-1 MNIST-only snapshots (the control: separated means)
-    {"kind": "kaggle", "ds": "blackloko/uerf-phase1-ckpt-step6000",
-     "file": "lifetime_main.pt", "label": "kaggle/phase1-step6000"},
-    {"kind": "kaggle", "ds": "blackloko/uerf-phase1-emergent-ckpt-step4000",
-     "file": "lifetime_main.pt", "label": "kaggle/phase1-emergent-step4000"},
-    {"kind": "kaggle", "ds": "blackloko/uerf-phase1-emergent-ckpt-step8000",
-     "file": "lifetime_main.pt", "label": "kaggle/phase1-emergent-step8000"},
-    {"kind": "kaggle", "ds": "blackloko/uerf-phase1-emergent-complete-ckpt",
-     "file": "lifetime_main.pt", "label": "kaggle/phase1-emergent-complete"},
-    {"kind": "kaggle", "ds": "blackloko/uerf-phase1-complete-ckpt",
-     "file": "lifetime_main.pt", "label": "kaggle/phase1-complete"},
+    # Kaggle — Phase-1 MNIST-only snapshots (the control: separated means),
+    # relayed onto HF as zips (Kaggle token denies datasets.get from Modal egress)
+    {"kind": "hf_zip", "file": "kaggle_phase1-step6000.zip",
+     "member": "lifetime_main.pt", "label": "kaggle/phase1-step6000"},
+    {"kind": "hf_zip", "file": "kaggle_phase1-emergent-step4000.zip",
+     "member": "lifetime_main.pt", "label": "kaggle/phase1-emergent-step4000"},
+    {"kind": "hf_zip", "file": "kaggle_phase1-emergent-step8000.zip",
+     "member": "lifetime_main.pt", "label": "kaggle/phase1-emergent-step8000"},
+    {"kind": "hf_zip", "file": "kaggle_phase1-emergent-complete.zip",
+     "member": "lifetime_main.pt", "label": "kaggle/phase1-emergent-complete"},
+    {"kind": "hf_zip", "file": "kaggle_phase1-complete.zip",
+     "member": "lifetime_main.pt", "label": "kaggle/phase1-complete"},
     # HF — lifetime gauntlet
     {"kind": "hf", "file": "emergent_main.pt", "label": "hf/emergent_main"},
     {"kind": "hf", "file": "emv2_main.pt", "label": "hf/emv2_main"},
@@ -211,7 +219,7 @@ SOURCES = [
 
 def main_kaggle():
     """Re-run only the Kaggle Phase-1 datasets (classic kaggle client)."""
-    return main([s for s in SOURCES if s["kind"] == "kaggle"])
+    return main([s for s in SOURCES if s["kind"] in ("kaggle", "hf_zip")])
 
 
 def main(sources=None):
