@@ -21,61 +21,88 @@ import modal
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install("torch==2.4.0", "torchvision==0.19.0", "numpy",
-                 "huggingface_hub", "pillow")
+                 "huggingface_hub", "pillow", "kaggle")
 )
 app = modal.App("uerf-whitened-readout", image=image)
 HF_DATASET = "BlackLoks/uerf-checkpoints"
 
 
-@app.function(gpu="A10G", timeout=7200, memory=46080, cpu=8.0)
-def run(hf_token: str, ckpt: str = "phase3_main.pt", n_eval: int = 2000,
-        domain=(0, 10)) -> dict:
+@app.function(gpu="A10G", timeout=7200, memory=80000, cpu=8.0)
+def run(hf_token: str, source: dict, n_eval: int = 2000,
+        domain=(0, 10), kaggle_user: str = "", kaggle_key: str = "") -> dict:
+    """source = {'kind':'hf','file':'phase3_main.pt'}  or
+                {'kind':'kaggle','ds':'blackloko/uerf-phase1-complete-ckpt',
+                 'file':'lifetime_main.pt'}"""
     import os, sys, shutil
     import torch, numpy as np
     from huggingface_hub import hf_hub_download
     ws = "/tmp/ws"; os.makedirs(ws, exist_ok=True); sys.path.insert(0, ws)
 
-    def grab(fn, rn=None):
+    def grab_hf(fn, rn=None):
         p = hf_hub_download(HF_DATASET, fn, repo_type="dataset", token=hf_token, local_dir=ws)
         if rn: shutil.copy(p, os.path.join(ws, rn)); return os.path.join(ws, rn)
         return p
-    grab("phase2_brain.py", "uerf_brain.py")
-    grab("phase2_lifetime.py", "uerf_lifetime.py")
-    grab(ckpt)
-    import uerf_brain as U, uerf_lifetime as L
+    # loader + eval pipeline always come from the canonical HF brain
+    grab_hf("phase2_brain.py", "uerf_brain.py")
+    grab_hf("phase2_lifetime.py", "uerf_lifetime.py")
 
+    label = source.get("label", source.get("file", "ckpt"))
+    if source["kind"] == "hf":
+        ckpt_path = grab_hf(source["file"])
+    else:  # kaggle dataset
+        os.environ["KAGGLE_USERNAME"] = kaggle_user
+        os.environ["KAGGLE_KEY"] = kaggle_key
+        import subprocess
+        kd = os.path.join(ws, "kag"); os.makedirs(kd, exist_ok=True)
+        subprocess.run(["kaggle", "datasets", "download", "-d", source["ds"],
+                        "-p", kd, "--unzip"], check=True)
+        ckpt_path = os.path.join(kd, source["file"])
+
+    import uerf_brain as U, uerf_lifetime as L
     dev = "cuda"
-    field = U.UERFField.load_checkpoint(os.path.join(ws, ckpt), device=dev)
+    field = U.UERFField.load_checkpoint(ckpt_path, device=dev)
     field._replay_disabled = True
     LO, HI = domain
-    out = {"ckpt": ckpt, "domain": [LO, HI],
+    HI = min(HI, field.n_classes)
+    out = {"label": label, "domain": [LO, HI],
            "n_max": field.n_max, "input_dim": int(field.input_dim),
            "n_classes": field.n_classes, "exp": int(field.experience_count)}
 
     # ── 1. Recover the brain's OWN stored class means mu_k (input_dim-dim) ──────
-    # _teach_bond_sum[k,j]/count[k] = outer(c_k, mu_kj * c_j)
-    # => mu_kj = c_k^T (bond) c_j / (||c_k||^2 ||c_j||^2)
+    # Sensor->teach bond  C[t0+k, j] = outer(c_k, mu_kj * c_j)   (mu_kj = class-k
+    # mean of input feature j). Prefer the _teach_bond_sum accumulator when it is
+    # present; otherwise read the finished bond straight out of C (always there,
+    # even for early checkpoints that predate the accumulator).
+    #   mu_kj = c_k^T (bond) c_j / (||c_k||^2 ||c_j||^2)
     t0 = field.input_dim
     sens_idx = torch.arange(field.input_dim, device=dev)
     c_sens = field.c[sens_idx]                       # (D, d)
     c_sens_n2 = (c_sens * c_sens).sum(-1).clamp(min=1e-8)   # (D,)
-    bsum = field._teach_bond_sum                     # (n_classes, n_max, d, d)
-    bcnt = field._teach_bond_count.clamp(min=1.0)    # (n_classes,)
+    bsum = getattr(field, "_teach_bond_sum", None)
+    bcnt = getattr(field, "_teach_bond_count", None)
+    use_acc = bsum is not None and bcnt is not None
+    out["mean_source"] = "_teach_bond_sum" if use_acc else "C_matrix"
 
     mu = torch.zeros(HI - LO, field.input_dim, device=dev)
     for ki, k in enumerate(range(LO, HI)):
         c_k = field.c[t0 + k]                        # (d,)
         ck_n2 = (c_k * c_k).sum().clamp(min=1e-8)
-        bond = bsum[k, sens_idx] / bcnt[k]           # (D, d, d) = outer(c_k, mu_kj c_j)
-        # c_k^T bond c_j  for every sensor j, vectorized
+        if use_acc and float(bcnt[k]) > 0:
+            bond = bsum[k, sens_idx] / bcnt[k].clamp(min=1.0)
+        else:
+            bond = field.C[t0 + k, sens_idx]         # (D, d, d) = outer(c_k, mu_kj c_j)
         left = torch.einsum('d,jde->je', c_k, bond)  # (D, d) = mu_kj * (c_k.c_k) * c_j
         proj = (left * c_sens).sum(-1)               # (D,) = mu_kj ||c_k||^2 ||c_j||^2
         mu[ki] = proj / (ck_n2 * c_sens_n2)
-    out["classes_with_memory"] = int((bcnt[LO:HI] > 0).sum())
+    nonzero = (mu.norm(dim=-1) > 1e-8)
+    out["classes_with_memory"] = int(nonzero.sum())
 
     # ── 2. Build sensory feature vectors x for the eval set (brain's input) ────
     encoder = L.UniversalEncoder(device=dev)
-    proj = U.SensoryProjection(512, L.CONFIG['n_sensory'], seed=42); proj.to(dev)
+    n_sens = L.CONFIG['n_sensory']
+    out["n_sensory_cfg"] = n_sens
+    out["input_dim_matches_cfg"] = (n_sens == field.input_dim)
+    proj = U.SensoryProjection(512, n_sens, seed=42); proj.to(dev)
     _, te = L.load_mnist()
     X, ys = [], []
     for i in range(min(n_eval, len(te))):
@@ -130,14 +157,54 @@ def run(hf_token: str, ckpt: str = "phase3_main.pt", n_eval: int = 2000,
     return out
 
 
-def main(ckpts=None):
+# Every checkpoint: HF (lifetime) + Kaggle (Phase-1 MNIST snapshots)
+SOURCES = [
+    # Kaggle — Phase-1 MNIST-only snapshots (the control: separated means)
+    {"kind": "kaggle", "ds": "blackloko/uerf-phase1-ckpt-step6000",
+     "file": "lifetime_main.pt", "label": "kaggle/phase1-step6000"},
+    {"kind": "kaggle", "ds": "blackloko/uerf-phase1-emergent-ckpt-step4000",
+     "file": "lifetime_main.pt", "label": "kaggle/phase1-emergent-step4000"},
+    {"kind": "kaggle", "ds": "blackloko/uerf-phase1-emergent-ckpt-step8000",
+     "file": "lifetime_main.pt", "label": "kaggle/phase1-emergent-step8000"},
+    {"kind": "kaggle", "ds": "blackloko/uerf-phase1-emergent-complete-ckpt",
+     "file": "lifetime_main.pt", "label": "kaggle/phase1-emergent-complete"},
+    {"kind": "kaggle", "ds": "blackloko/uerf-phase1-complete-ckpt",
+     "file": "lifetime_main.pt", "label": "kaggle/phase1-complete"},
+    # HF — lifetime gauntlet
+    {"kind": "hf", "file": "emergent_main.pt", "label": "hf/emergent_main"},
+    {"kind": "hf", "file": "emv2_main.pt", "label": "hf/emv2_main"},
+    {"kind": "hf", "file": "phase2_main.pt", "label": "hf/phase2_main"},
+    {"kind": "hf", "file": "phase3_progress.pt", "label": "hf/phase3_progress"},
+    {"kind": "hf", "file": "pl1done_main.pt", "label": "hf/pl1done_main"},
+    {"kind": "hf", "file": "phase3_main.pt", "label": "hf/phase3_main"},
+]
+
+
+def main(sources=None):
     import os, json
     tok = os.environ["HF_READ_TOKEN"]
-    ckpts = ckpts or ["phase3_main.pt"]
+    ku = os.environ.get("KAGGLE_USERNAME", "")
+    kk = os.environ.get("KAGGLE_KEY", "")
+    sources = sources or SOURCES
     allres = {}
-    for ck in ckpts:
-        print(f"\n{'='*60}\nWHITENED READOUT — {ck}\n{'='*60}", flush=True)
-        r = run.remote(tok, ckpt=ck)
+    for src in sources:
+        lab = src.get("label", src.get("file"))
+        print(f"\n{'='*60}\nWHITENED READOUT — {lab}\n{'='*60}", flush=True)
+        try:
+            r = run.remote(tok, src, kaggle_user=ku, kaggle_key=kk)
+        except Exception as e:
+            r = {"label": lab, "error": str(e)[:500]}
         print(json.dumps(r, indent=2), flush=True)
-        allres[ck] = r
+        allres[lab] = r
+    print("\n" + "#"*60 + "\nSUMMARY\n" + "#"*60, flush=True)
+    print(f"{'checkpoint':32} {'native':>7} {'recon':>7} {'whiten':>7}", flush=True)
+    for lab, r in allres.items():
+        if "error" in r:
+            print(f"{lab:32} ERROR: {r['error'][:60]}", flush=True); continue
+        print(f"{lab:32} {r.get('brain_predict_masked',0):7} "
+              f"{r.get('reconstructed_matched_filter',0):7} "
+              f"{r.get('best_whitened',0):7}", flush=True)
+    with open("whitened_readout_all.json", "w") as f:
+        json.dump(allres, f, indent=2)
+    print("\n[saved] whitened_readout_all.json", flush=True)
     return allres
