@@ -1,23 +1,23 @@
 {
   "kaggle/phase1-step6000": {
     "label": "kaggle/phase1-step6000",
-    "error": "Command '['kaggle', 'datasets', 'download', '-d', 'blackloko/uerf-phase1-ckpt-step6000', '-p', '/tmp/ws/kag', '--unzip']' returned non-zero exit status 1."
+    "error": "kaggle download failed rc=1: OUT= ERR=403 Client Error: Forbidden for url: https://api.kaggle.com/v1/datasets.DatasetApiService/GetDatasetMetadata\n"
   },
   "kaggle/phase1-emergent-step4000": {
     "label": "kaggle/phase1-emergent-step4000",
-    "error": "Command '['kaggle', 'datasets', 'download', '-d', 'blackloko/uerf-phase1-emergent-ckpt-step4000', '-p', '/tmp/ws/kag', '--unzip']' returned non-zero exit status 1."
+    "error": "kaggle download failed rc=1: OUT= ERR=403 Client Error: Forbidden for url: https://api.kaggle.com/v1/datasets.DatasetApiService/GetDatasetMetadata\n"
   },
   "kaggle/phase1-emergent-step8000": {
     "label": "kaggle/phase1-emergent-step8000",
-    "error": "Command '['kaggle', 'datasets', 'download', '-d', 'blackloko/uerf-phase1-emergent-ckpt-step8000', '-p', '/tmp/ws/kag', '--unzip']' returned non-zero exit status 1."
+    "error": "kaggle download failed rc=1: OUT= ERR=403 Client Error: Forbidden for url: https://api.kaggle.com/v1/datasets.DatasetApiService/GetDatasetMetadata\n"
   },
   "kaggle/phase1-emergent-complete": {
     "label": "kaggle/phase1-emergent-complete",
-    "error": "Command '['kaggle', 'datasets', 'download', '-d', 'blackloko/uerf-phase1-emergent-complete-ckpt', '-p', '/tmp/ws/kag', '--unzip']' returned non-zero exit status 1."
+    "error": "kaggle download failed rc=1: OUT= ERR=403 Client Error: Forbidden for url: https://api.kaggle.com/v1/datasets.DatasetApiService/GetDatasetMetadata\n"
   },
   "kaggle/phase1-complete": {
     "label": "kaggle/phase1-complete",
-    "error": "Command '['kaggle', 'datasets', 'download', '-d', 'blackloko/uerf-phase1-complete-ckpt', '-p', '/tmp/ws/kag', '--unzip']' returned non-zero exit status 1."
+    "error": "kaggle download failed rc=1: OUT= ERR=403 Client Error: Forbidden for url: https://api.kaggle.com/v1/datasets.DatasetApiService/GetDatasetMetadata\n"
   },
   "hf/emergent_main": {
     "label": "hf/emergent_main",
@@ -29,6 +29,18 @@
     "input_dim": 128,
     "n_classes": 310,
     "exp": 4000,
+    "fixes": {
+      "fix1": true,
+      "fix2": true,
+      "fix3": true,
+      "fix4": true,
+      "fix5": true,
+      "fix6": true
+    },
+    "neuro_enabled": false,
+    "neuro_levels": {},
+    "replay_entries": 0,
+    "replay_disabled_for_eval": true,
     "mean_source": "_teach_bond_sum",
     "classes_with_memory": 10,
     "n_sensory_cfg": 128,
@@ -36,14 +48,14 @@
     "n_eval": 2000,
     "brain_predict_full310": 28.85,
     "brain_predict_masked": 28.85,
-    "reconstructed_matched_filter": 73.6,
+    "reconstructed_matched_filter": 73.55,
     "whitened_mahalanobis": {
-      "ridge_0.001": 81.1,
+      "ridge_0.001": 81.15,
       "ridge_0.01": 82.1,
-      "ridge_0.1": 84.25,
-      "ridge_0.5": 85.65
+      "ridge_0.1": 84.2,
+      "ridge_0.5": 85.7
     },
-    "best_whitened": 85.65
+    "best_whitened": 85.7
   },
   "hf/emv2_main": {
     "label": "hf/emv2_main",
@@ -55,6 +67,18 @@
     "input_dim": 128,
     "n_classes": 310,
     "exp": 10000,
+    "fixes": {
+      "fix1": true,
+      "fix2": true,
+      "fix3": true,
+      "fix4": true,
+      "fix5": true,
+      "fix6": true
+    },
+    "neuro_enabled": false,
+    "neuro_levels": {},
+    "replay_entries": 0,
+    "replay_disabled_for_eval": true,
     "mean_source": "_teach_bond_sum",
     "classes_with_memory": 10,
     "n_sensory_cfg": 128,
@@ -62,14 +86,14 @@
     "n_eval": 2000,
     "brain_predict_full310": 28.85,
     "brain_predict_masked": 28.85,
-    "reconstructed_matched_filter": 73.75,
+    "reconstructed_matched_filter": 73.7,
     "whitened_mahalanobis": {
-      "ridge_0.001": 82.35,
+      "ridge_0.001": 82.4,
       "ridge_0.01": 83.05,
-      "ridge_0.1": 84.8,
-      "ridge_0.5": 85.65
+      "ridge_0.1": 84.75,
+      "ridge_0.5": 85.7
     },
-    "best_whitened": 85.65
+    "best_whitened": 85.7
   },
   "hf/phase2_main": {
     "label": "hf/phase2_main",
@@ -81,6 +105,18 @@
     "input_dim": 128,
     "n_classes": 310,
     "exp": 40000,
+    "fixes": {
+      "fix1": true,
+      "fix2": true,
+      "fix3": true,
+      "fix4": true,
+      "fix5": true,
+      "fix6": true
+    },
+    "neuro_enabled": false,
+    "neuro_levels": {},
+    "replay_entries": 0,
+    "replay_disabled_for_eval": true,
     "mean_source": "_teach_bond_sum",
     "classes_with_memory": 10,
     "n_sensory_cfg": 128,
@@ -92,7 +128,7 @@
     "whitened_mahalanobis": {
       "ridge_0.001": 82.95,
       "ridge_0.01": 83.2,
-      "ridge_0.1": 84.9,
+      "ridge_0.1": 84.85,
       "ridge_0.5": 85.55
     },
     "best_whitened": 85.55
@@ -107,6 +143,18 @@
     "input_dim": 128,
     "n_classes": 310,
     "exp": 80000,
+    "fixes": {
+      "fix1": true,
+      "fix2": true,
+      "fix3": true,
+      "fix4": true,
+      "fix5": true,
+      "fix6": true
+    },
+    "neuro_enabled": false,
+    "neuro_levels": {},
+    "replay_entries": 0,
+    "replay_disabled_for_eval": true,
     "mean_source": "_teach_bond_sum",
     "classes_with_memory": 10,
     "n_sensory_cfg": 128,
@@ -118,7 +166,7 @@
     "whitened_mahalanobis": {
       "ridge_0.001": 82.95,
       "ridge_0.01": 83.2,
-      "ridge_0.1": 84.9,
+      "ridge_0.1": 84.85,
       "ridge_0.5": 85.55
     },
     "best_whitened": 85.55
@@ -133,6 +181,18 @@
     "input_dim": 128,
     "n_classes": 310,
     "exp": 10000,
+    "fixes": {
+      "fix1": true,
+      "fix2": true,
+      "fix3": true,
+      "fix4": true,
+      "fix5": true,
+      "fix6": true
+    },
+    "neuro_enabled": false,
+    "neuro_levels": {},
+    "replay_entries": 0,
+    "replay_disabled_for_eval": true,
     "mean_source": "_teach_bond_sum",
     "classes_with_memory": 10,
     "n_sensory_cfg": 128,
@@ -144,13 +204,47 @@
     "whitened_mahalanobis": {
       "ridge_0.001": 82.95,
       "ridge_0.01": 83.2,
-      "ridge_0.1": 84.9,
+      "ridge_0.1": 84.85,
       "ridge_0.5": 85.55
     },
     "best_whitened": 85.55
   },
   "hf/phase3_main": {
     "label": "hf/phase3_main",
-    "error": "CUDA out of memory. Tried to allocate 2.44 GiB. GPU 0 has a total capacity of 22.06 GiB of which 895.44 MiB is free. Process 1 has 21.18 GiB memory in use. Of the allocated memory 19.99 GiB is allocated by PyTorch, and 898.66 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environmen"
+    "domain": [
+      0,
+      10
+    ],
+    "n_max": 800,
+    "input_dim": 128,
+    "n_classes": 310,
+    "exp": 80000,
+    "fixes": {
+      "fix1": true,
+      "fix2": true,
+      "fix3": true,
+      "fix4": true,
+      "fix5": true,
+      "fix6": true
+    },
+    "neuro_enabled": false,
+    "neuro_levels": {},
+    "replay_entries": 0,
+    "replay_disabled_for_eval": true,
+    "mean_source": "_teach_bond_sum",
+    "classes_with_memory": 10,
+    "n_sensory_cfg": 128,
+    "input_dim_matches_cfg": true,
+    "n_eval": 2000,
+    "brain_predict_full310": 38.5,
+    "brain_predict_masked": 38.75,
+    "reconstructed_matched_filter": 74.4,
+    "whitened_mahalanobis": {
+      "ridge_0.001": 82.95,
+      "ridge_0.01": 83.2,
+      "ridge_0.1": 84.85,
+      "ridge_0.5": 85.55
+    },
+    "best_whitened": 85.55
   }
 }
