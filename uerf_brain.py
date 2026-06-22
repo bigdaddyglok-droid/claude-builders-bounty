@@ -702,8 +702,8 @@ class UERFField:
         self._valence_count = torch.zeros(n_max, device=dev)
         self._crystallization_threshold = 0.6  # must sustain valence > this
 
-        # ── Neuromodulation (all 1.0 = identity; disabled by default)
-        self.neuro_enabled = False
+        # ── Neuromodulation (all 1.0 = identity; enabled by default)
+        self.neuro_enabled = True
         self._neuro = {'ach': 1.0, 'da': 1.0, 'na': 1.0, 'sero': 1.0}
         self._mean_valence_prev = 0.0
 
@@ -781,7 +781,7 @@ class UERFField:
         mean_valence = self._valence_accumulator / self._valence_count.clamp(min=1)
         _ach = self._neuro.get('ach', 1.0)
         _sero = self._neuro.get('sero', 1.0)
-        _thresh = max(0.3, min(0.85, self._crystallization_threshold * (2.0 - _ach) / _sero))
+        _thresh = max(0.3, min(0.85, self._crystallization_threshold * _ach / _sero))
         valence_sufficient = mean_valence > _thresh  # ach/sero=1.0 → thresh=0.6 (identity)
         return golden_proximity & valence_sufficient & self.alive_mask
 
@@ -1332,8 +1332,12 @@ class UERFDynamics:
                 # Resonance: how aligned is each oscillator's c with input?
                 resonance = (self.c * input_sig.unsqueeze(0)).sum(-1)  # (n,)
                 # Gain: resonant oscillators get amplified recurrent drive
-                # gain ∈ [0.1, 2.0]: non-resonant get suppressed, resonant get boosted
-                gain = 0.1 + 1.9 * ((resonance + 1.0) / 2.0)  # map [-1,1] to [0.1, 2.0]
+                # NA scales the contrast: high NA → steeper gain curve (sharper SNR)
+                _na_gain = self._neuro.get('na', 1.0)
+                r = (resonance + 1.0) / 2.0  # normalize resonance to [0,1]
+                gain_lo = max(0.05, 0.1 / _na_gain)   # suppress non-resonant harder at high NA
+                gain_hi = 0.1 + 1.9 * _na_gain        # amplify resonant more at high NA
+                gain = (gain_lo + (gain_hi - gain_lo) * r).clamp(0.05, 4.0)
                 # Only gate interior oscillators (not sensory/teaching)
                 interior_mask = ~self._is_sensory & ~self._is_teaching
                 gain = torch.where(interior_mask, gain, torch.ones_like(gain))
@@ -1641,8 +1645,10 @@ class UERFLearning:
                 delta_C = delta_C * sender_alive
 
                 alpha_scale = alpha[r0:r1].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-                _ach_da = self._neuro.get('ach', 1.0) * self._neuro.get('da', 1.0)
-                self.C[r0:r1] += lr * _ach_da * alpha_scale * delta_C * recv_mask.float().unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+                # ACh gates overall plasticity; DA provides independent RPE-based LR boost
+                _ach = self._neuro.get('ach', 1.0)
+                _da  = self._neuro.get('da',  1.0)
+                self.C[r0:r1] += lr * _ach * _da * alpha_scale * delta_C * recv_mask.float().unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
                 # Decay bonds. locked rows are always frozen (no decay).
                 # that share a chunk with interior receivers also get decayed,
                 # bleeding teach-slot bonds between Pathway-2 rewrites.
@@ -2239,8 +2245,13 @@ class UERFLearning:
             return new_n
 
     def _update_neuromodulators(self):
-        """Update neuromodulator levels from the brain's own signals each tick.
-        When neuro_enabled=False (default), returns immediately — all levels stay 1.0."""
+        """Update neuromodulator levels from independent brain signals each tick.
+        Each modulator has its own driving source:
+          ACh  — sensory novelty + internal contradiction (plasticity gate)
+          DA   — temporal Δvalence = reward prediction error (credit signal)
+          NA   — spatial valence variance + sudden change (arousal / SNR)
+          Sero — sustained low contradiction, tonic slow-timescale (stability)
+        When neuro_enabled=False, returns immediately — all levels stay 1.0."""
         if not self.neuro_enabled:
             return
 
@@ -2250,27 +2261,44 @@ class UERFLearning:
             return
         vi = V[interior]
 
-        mean_v = float(vi.mean())
-        mean_c = float((1.0 - vi.mean().clamp(-1, 1)) / 2.0)
-        var_c  = float((vi.std() * 2.0).clamp(0, 1))
+        mean_v   = float(vi.mean())
+        vi_std   = float(vi.std())
+        mean_c   = float((1.0 - vi.mean().clamp(-1, 1)) / 2.0)
+        var_c    = float((vi_std * 2.0).clamp(0, 1))
         contradiction = max(mean_c, var_c)
 
-        # Acetylcholine — high contradiction → more plastic (LR↑, decay↓, birth↓ threshold)
-        ach_target = 1.0 + 0.5 * math.tanh((contradiction - 0.45) * 4)
+        # --- ACh: sensory novelty (independent) + internal contradiction ---
+        # High when environment is novel (input variance) or field is contradicted.
+        # Both independently justify more plasticity (LR↑, decay↓, crystallize harder).
+        sensory_novelty = float(getattr(self, '_input_running_var', 0.0))
+        novelty_signal  = math.tanh(sensory_novelty * 20.0)
+        ach_drive = (contradiction + 0.5 * novelty_signal) - 0.45
+        ach_target = 1.0 + 0.5 * math.tanh(ach_drive * 4)
         self._neuro['ach'] = float(max(0.5, min(1.5,
             0.9 * self._neuro['ach'] + 0.1 * ach_target)))
 
-        # Dopamine — positive Δvalence → reinforce (LR boost); derivative→0 at plateau
+        # --- DA: temporal Δvalence — reward prediction error (RPE) ---
+        # Rises when valence improves; falls at plateau or decline.
+        # Independent of ACh: governs credit (which bonds to strengthen) not
+        # overall plasticity gate. Now decoupled from ACh at the bond LR site.
         delta_v = mean_v - self._mean_valence_prev
         self._mean_valence_prev = mean_v
         self._neuro['da'] = float(max(0.7, min(1.3,
             1.0 + 0.3 * math.tanh(delta_v * 10))))
 
-        # Noradrenaline — high valence variance → higher routing temperature (explore)
+        # --- NA: spatial field variance + temporal surprise ---
+        # Spatial: high vi.std() → heterogeneous field → uncertain → higher NA
+        # Temporal: |Δvalence| → sudden change regardless of sign → brief NA surge
+        # Together they sharpen the gain contrast and routing temperature.
+        na_spatial  = 1.0 + 0.5 * math.tanh((vi_std - 0.2) * 5)
+        na_surprise = 0.3 * math.tanh(abs(delta_v) * 15)
+        na_target   = na_spatial + na_surprise
         self._neuro['na'] = float(max(0.5, min(2.0,
-            1.0 + 0.5 * math.tanh((float(vi.std()) - 0.2) * 5))))
+            0.85 * self._neuro['na'] + 0.15 * na_target)))
 
-        # Serotonin — sustained low contradiction → less dissipation, easier crystallize
+        # --- Serotonin: tonic, slow-timescale stability signal ---
+        # Rises only with sustained low contradiction (τ ≈ 50 ticks at 0.98 decay).
+        # High sero → less dissipation (longer memory) + easier crystallization.
         sero_target = 1.0 + 0.4 * max(0.0, math.tanh((0.45 - contradiction) * 5))
         self._neuro['sero'] = float(max(1.0, min(1.4,
             0.98 * self._neuro['sero'] + 0.02 * sero_target)))
