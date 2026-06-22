@@ -706,6 +706,8 @@ class UERFField:
         self.neuro_enabled = True
         self._neuro = {'ach': 1.0, 'da': 1.0, 'na': 1.0, 'sero': 1.0}
         self._mean_valence_prev = 0.0
+        # per-input surprise = current deviation² / typical deviation (1.0=typical)
+        self._input_surprise = 1.0
 
     # ── Helpers ──
     def energy(self):
@@ -2268,11 +2270,12 @@ class UERFLearning:
         contradiction = max(mean_c, var_c)
 
         # --- ACh: sensory novelty (independent) + internal contradiction ---
-        # High when environment is novel (input variance) or field is contradicted.
-        # Both independently justify more plasticity (LR↑, decay↓, crystallize harder).
-        sensory_novelty = float(getattr(self, '_input_running_var', 0.0))
-        novelty_signal  = math.tanh(sensory_novelty * 20.0)
-        ach_drive = (contradiction + 0.5 * novelty_signal) - 0.45
+        # Novelty = how surprising THIS input is vs the typical input deviation
+        # (ratio centered at 1.0). >1 → novel → +ACh; <1 → familiar → −ACh.
+        # This is a real per-input signal, not a saturated running level.
+        surprise = float(getattr(self, '_input_surprise', 1.0))
+        novelty_signal = math.tanh((surprise - 1.0) * 1.5)  # ∈(-1,1), 0 at typical
+        ach_drive = (contradiction - 0.45) + 0.5 * novelty_signal
         ach_target = 1.0 + 0.5 * math.tanh(ach_drive * 4)
         self._neuro['ach'] = float(max(0.5, min(1.5,
             0.9 * self._neuro['ach'] + 0.1 * ach_target)))
@@ -2346,6 +2349,10 @@ class UERFExperience:
                     (1 - ema_rate) * self._input_running_mean + ema_rate * x
                 )
                 diff = (x - self._input_running_mean).norm()
+                # surprise BEFORE updating var: how this input's deviation compares
+                # to the typical (running) deviation. 1.0 = typical, >1 = novel.
+                self._input_surprise = float(
+                    (diff ** 2) / self._input_running_var.clamp(min=1e-6))
                 self._input_running_var = (
                     0.99 * self._input_running_var + 0.01 * diff ** 2
                 )
