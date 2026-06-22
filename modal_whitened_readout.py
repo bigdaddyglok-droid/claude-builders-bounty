@@ -52,10 +52,27 @@ def run(hf_token: str, source: dict, n_eval: int = 2000,
     else:  # kaggle dataset
         os.environ["KAGGLE_USERNAME"] = kaggle_user
         os.environ["KAGGLE_KEY"] = kaggle_key
-        import subprocess
+        # newer kaggle CLI prefers the json file with 0600 perms
+        kcfg = os.path.expanduser("~/.kaggle"); os.makedirs(kcfg, exist_ok=True)
+        import json as _json
+        with open(os.path.join(kcfg, "kaggle.json"), "w") as _f:
+            _json.dump({"username": kaggle_user, "key": kaggle_key}, _f)
+        os.chmod(os.path.join(kcfg, "kaggle.json"), 0o600)
+        import subprocess, zipfile
         kd = os.path.join(ws, "kag"); os.makedirs(kd, exist_ok=True)
-        subprocess.run(["kaggle", "datasets", "download", "-d", source["ds"],
-                        "-p", kd, "--unzip"], check=True)
+        # download the zip (no --unzip: extract only the .pt to save disk)
+        r = subprocess.run(["kaggle", "datasets", "download", "-d", source["ds"],
+                            "-p", kd], capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"kaggle download failed rc={r.returncode}: "
+                               f"OUT={r.stdout[-800:]} ERR={r.stderr[-800:]}")
+        zips = [f for f in os.listdir(kd) if f.endswith(".zip")]
+        if not zips:
+            raise RuntimeError(f"no zip downloaded; dir={os.listdir(kd)}")
+        zp = os.path.join(kd, zips[0])
+        with zipfile.ZipFile(zp) as z:
+            z.extract(source["file"], kd)
+        os.remove(zp)
         ckpt_path = os.path.join(kd, source["file"])
 
     import uerf_brain as U, uerf_lifetime as L
