@@ -21,7 +21,7 @@ import modal
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install("torch==2.4.0", "torchvision==0.19.0", "numpy",
-                 "huggingface_hub", "pillow", "kaggle")
+                 "huggingface_hub", "pillow", "kaggle==1.6.17")
     .env({"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
 )
 app = modal.App("uerf-whitened-readout", image=image)
@@ -207,6 +207,11 @@ SOURCES = [
     {"kind": "hf", "file": "pl1done_main.pt", "label": "hf/pl1done_main"},
     {"kind": "hf", "file": "phase3_main.pt", "label": "hf/phase3_main"},
 ]
+
+
+def main_kaggle():
+    """Re-run only the Kaggle Phase-1 datasets (classic kaggle client)."""
+    return main([s for s in SOURCES if s["kind"] == "kaggle"])
 
 
 def main(sources=None):
