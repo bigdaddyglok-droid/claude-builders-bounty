@@ -2646,6 +2646,116 @@ class UERFExperience:
             return int(holder['sims'].argmax())
         return -1
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # NATIVE FULL-FIELD READOUT
+    #
+    # The default predict() collapses each teach slot's d-dim state to a single
+    # magnitude and argmaxes — discarding 31/32 of the signal the field actually
+    # holds. This reads the WHOLE settled teach-field (n_classes × d) and
+    # recognizes an input by matching it against prototypes the brain builds
+    # from ITS OWN remembered examples (the per-class replay buffer it filled
+    # during training). No external classifier, no held-out labels — the brain
+    # recognizing new inputs by how closely their field-response resembles the
+    # field-response of things it already remembers.
+    # ─────────────────────────────────────────────────────────────────────────
+    def _capture_teach_field(self, x, n_relax=None):
+        """Run a non-destructive eval pass and return the settled full teach
+        field flattened to (n_classes*d,). None if no teach slots."""
+        if self.t_start is None:
+            return None
+        holder = {}
+        orig = self.predict
+        def _grab(_o=orig):
+            holder['f'] = self.s[self.t_start:self.t_end].flatten().clone()
+            return _o()
+        self.predict = _grab
+        self.eval_predict(x, n_relax=n_relax)
+        self.predict = orig
+        return holder.get('f', None)
+
+    def build_self_catalog(self, n_relax=None, extra_xs=None, extra_ys=None):
+        """Build per-class full-field prototypes the brain reads itself by.
+
+        Primary source is the brain's OWN replay memory (self._replay_per_class),
+        so the catalog is built from examples the brain itself chose to remember.
+        Optional extra_xs/extra_ys (already class-offset labels) augment it when
+        a wider calibration is wanted. Stores self._field_catalog:
+        (n_classes, n_classes*d) unit-normalized; classes with no memory stay 0.
+        """
+        if self.t_start is None:
+            return 0
+        D = self.n_classes * self.d
+        sums   = torch.zeros(self.n_classes, D, device=self.device)
+        counts = torch.zeros(self.n_classes, device=self.device)
+
+        # the brain's own remembered examples
+        was_disabled = getattr(self, '_replay_disabled', False)
+        self._replay_disabled = True   # never write replay while reading it
+        for cls_id, buf in self._replay_per_class.items():
+            if not (0 <= cls_id < self.n_classes):
+                continue
+            for x, _tv in buf:
+                f = self._capture_teach_field(x.to(self.device), n_relax=n_relax)
+                if f is not None:
+                    sums[cls_id] += f
+                    counts[cls_id] += 1
+
+        # optional wider calibration
+        if extra_xs is not None and extra_ys is not None:
+            for x, y in zip(extra_xs, extra_ys):
+                y = int(y)
+                if not (0 <= y < self.n_classes):
+                    continue
+                f = self._capture_teach_field(x.to(self.device), n_relax=n_relax)
+                if f is not None:
+                    sums[y] += f
+                    counts[y] += 1
+        self._replay_disabled = was_disabled
+
+        mask = counts > 0
+        proto = torch.zeros_like(sums)
+        proto[mask] = sums[mask] / counts[mask].unsqueeze(-1)
+        norms = proto.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        self._field_catalog = proto / norms
+        n_fit = int(mask.sum())
+        print(f"[build_self_catalog] {n_fit}/{self.n_classes} class prototypes "
+              f"from {int(counts.sum())} remembered examples", flush=True)
+        return n_fit
+
+    def predict_native(self, domain_lo=None, domain_hi=None):
+        """Full-field recognition. Compares the current settled teach-field
+        against the brain's self-built catalog. Falls back to predict() if no
+        catalog exists. Returns per-class similarity scores (argmax = answer)."""
+        if self.t_start is None:
+            return self.predict()
+        if getattr(self, '_field_catalog', None) is None:
+            return self.predict()
+        f = self.s[self.t_start:self.t_end].flatten()
+        f = f / f.norm().clamp(min=1e-8)
+        sims = (self._field_catalog * f.unsqueeze(0)).sum(-1)   # (n_classes,)
+        if domain_lo is not None and domain_hi is not None:
+            mask = torch.zeros(self.n_classes, dtype=torch.bool, device=self.device)
+            mask[domain_lo:domain_hi] = True
+            sims = sims.masked_fill(~mask, -1e9)
+        return sims
+
+    def eval_predict_native(self, x, n_relax=None, domain_lo=None, domain_hi=None):
+        """Non-destructive eval using the native full-field readout."""
+        if self.t_start is None:
+            return -1
+        holder = {}
+        orig = self.predict
+        def _native(_o=orig):
+            sims = self.predict_native(domain_lo=domain_lo, domain_hi=domain_hi)
+            holder['sims'] = sims.clone() if sims is not None else None
+            return _o()
+        self.predict = _native
+        self.eval_predict(x, n_relax=n_relax)
+        self.predict = orig
+        if holder.get('sims') is not None:
+            return int(holder['sims'].argmax())
+        return -1
+
     def eval_predict(self, x, n_relax=None, bond_chunk=256, return_scores=False):
         """
         Non-destructive evaluation. Save ALL state, run inference, restore.
@@ -2757,7 +2867,8 @@ class UERFExperience:
 # Attach experience methods
 for _m in ('experience', '_rehearse', 'predict', 'predict_scores', 'eval_predict',
            'calibrate_readout', 'fit_teach_templates', 'predict_template',
-           'eval_predict_template'):
+           'eval_predict_template', '_capture_teach_field', 'build_self_catalog',
+           'predict_native', 'eval_predict_native'):
     setattr(UERFField, _m, getattr(UERFExperience, _m))
 
 
@@ -2801,6 +2912,8 @@ class UERFCheckpoint:
         '_teach_bond_count',
         # neuromodulation
         'neuro_enabled', '_neuro', '_mean_valence_prev',
+        # native full-field readout catalog
+        '_field_catalog',
     )
 
     def save_checkpoint(self, path):
