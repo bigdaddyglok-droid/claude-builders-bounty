@@ -1,0 +1,162 @@
+{
+  "phase3_main/mnist": {
+    "label": "phase3_main",
+    "domain": [
+      0,
+      10
+    ],
+    "n_max": 800,
+    "input_dim": 128,
+    "n_classes": 310,
+    "exp": 80000,
+    "fixes": {
+      "fix1": true,
+      "fix2": true,
+      "fix3": true,
+      "fix4": true,
+      "fix5": true,
+      "fix6": true
+    },
+    "neuro_enabled": false,
+    "neuro_levels": {},
+    "replay_entries": 0,
+    "replay_disabled_for_eval": true,
+    "mean_source": "_teach_bond_sum",
+    "classes_with_memory": 10,
+    "n_sensory_cfg": 128,
+    "input_dim_matches_cfg": true,
+    "task": "mnist",
+    "label_offset": 0,
+    "n_eval": 2000,
+    "brain_predict_full310": 38.25,
+    "brain_predict_masked": 38.8,
+    "reconstructed_matched_filter": 76.6,
+    "whitened_mahalanobis": {
+      "ridge_0.001": 89.8,
+      "ridge_0.01": 90.1,
+      "ridge_0.1": 89.85,
+      "ridge_0.5": 88.6
+    },
+    "best_whitened": 90.1
+  },
+  "phase3_main/cifar": {
+    "label": "phase3_main",
+    "domain": [
+      10,
+      110
+    ],
+    "n_max": 800,
+    "input_dim": 128,
+    "n_classes": 310,
+    "exp": 80000,
+    "fixes": {
+      "fix1": true,
+      "fix2": true,
+      "fix3": true,
+      "fix4": true,
+      "fix5": true,
+      "fix6": true
+    },
+    "neuro_enabled": false,
+    "neuro_levels": {},
+    "replay_entries": 0,
+    "replay_disabled_for_eval": true,
+    "mean_source": "_teach_bond_sum",
+    "classes_with_memory": 100,
+    "n_sensory_cfg": 128,
+    "input_dim_matches_cfg": true,
+    "task": "cifar",
+    "label_offset": 10,
+    "n_eval": 2000,
+    "brain_predict_full310": 10.25,
+    "brain_predict_masked": 11.05,
+    "reconstructed_matched_filter": 40.45,
+    "whitened_mahalanobis": {
+      "ridge_0.001": 55.9,
+      "ridge_0.01": 55.95,
+      "ridge_0.1": 55.8,
+      "ridge_0.5": 55.05
+    },
+    "best_whitened": 55.95
+  },
+  "phase3_main/ti": {
+    "label": "phase3_main",
+    "domain": [
+      110,
+      310
+    ],
+    "n_max": 800,
+    "input_dim": 128,
+    "n_classes": 310,
+    "exp": 80000,
+    "fixes": {
+      "fix1": true,
+      "fix2": true,
+      "fix3": true,
+      "fix4": true,
+      "fix5": true,
+      "fix6": true
+    },
+    "neuro_enabled": false,
+    "neuro_levels": {},
+    "replay_entries": 0,
+    "replay_disabled_for_eval": true,
+    "mean_source": "_teach_bond_sum",
+    "classes_with_memory": 200,
+    "n_sensory_cfg": 128,
+    "input_dim_matches_cfg": true,
+    "task": "ti",
+    "label_offset": 110,
+    "n_eval": 2000,
+    "brain_predict_full310": 9.7,
+    "brain_predict_masked": 10.4,
+    "reconstructed_matched_filter": 39.4,
+    "whitened_mahalanobis": {
+      "ridge_0.001": 54.15,
+      "ridge_0.01": 54.1,
+      "ridge_0.1": 54.25,
+      "ridge_0.5": 54.85
+    },
+    "best_whitened": 54.85
+  },
+  "phase2_main/cifar": {
+    "label": "phase2_main",
+    "domain": [
+      10,
+      110
+    ],
+    "n_max": 800,
+    "input_dim": 128,
+    "n_classes": 310,
+    "exp": 40000,
+    "fixes": {
+      "fix1": true,
+      "fix2": true,
+      "fix3": true,
+      "fix4": true,
+      "fix5": true,
+      "fix6": true
+    },
+    "neuro_enabled": false,
+    "neuro_levels": {},
+    "replay_entries": 0,
+    "replay_disabled_for_eval": true,
+    "mean_source": "_teach_bond_sum",
+    "classes_with_memory": 100,
+    "n_sensory_cfg": 128,
+    "input_dim_matches_cfg": true,
+    "task": "cifar",
+    "label_offset": 10,
+    "n_eval": 2000,
+    "brain_predict_full310": 10.9,
+    "brain_predict_masked": 11.05,
+    "reconstructed_matched_filter": 40.45,
+    "whitened_mahalanobis": {
+      "ridge_0.001": 55.9,
+      "ridge_0.01": 55.95,
+      "ridge_0.1": 55.8,
+      "ridge_0.5": 55.05
+    },
+    "best_whitened": 55.95
+  }
+}
