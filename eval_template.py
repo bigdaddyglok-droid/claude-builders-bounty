@@ -166,6 +166,34 @@ def main():
     tmpl_m_acc = 100.0 * (np.asarray(tmpl_m_pred) == te_y).mean()
     print(f"[{args.name}] template masked:   {tmpl_m_acc:.1f}%  ({time.time()-t0:.0f}s)", flush=True)
 
+    # ── Full-field template readout ───────────────────────────────────────────
+    # Same labeled calibration examples, but store the ENTIRE flattened teach-
+    # field (n_classes×d = 9920-dim) per class, not just one slot's direction.
+    # Uses the brain's own build_self_catalog → predict_native pathway.
+    # Captures "which slots light up at what magnitude" — the same co-activation
+    # pattern the supervised probe sees at 86.6%.
+    print(f"[{args.name}] building full-field catalog ({len(tr_xs)} examples)...", flush=True)
+    t0 = time.time()
+    field.build_self_catalog(extra_xs=tr_xs, extra_ys=tr_ys, n_relax=args.n_relax)
+    print(f"[{args.name}] full-field catalog built in {time.time()-t0:.0f}s", flush=True)
+
+    print(f"[{args.name}] evaluating full-field template (unmasked)...", flush=True)
+    t0 = time.time()
+    ftmpl_pred = []
+    for x in te_xs:
+        ftmpl_pred.append(field.eval_predict_native(x, n_relax=args.n_relax))
+    ftmpl_acc = 100.0 * (np.asarray(ftmpl_pred) == te_y).mean()
+    print(f"[{args.name}] field_tmpl unmasked: {ftmpl_acc:.1f}%  ({time.time()-t0:.0f}s)", flush=True)
+
+    print(f"[{args.name}] evaluating full-field template (domain-masked [{lo}:{hi}])...", flush=True)
+    t0 = time.time()
+    ftmpl_m_pred = []
+    for x in te_xs:
+        ftmpl_m_pred.append(field.eval_predict_native(x, n_relax=args.n_relax,
+                                                       domain_lo=lo, domain_hi=hi))
+    ftmpl_m_acc = 100.0 * (np.asarray(ftmpl_m_pred) == te_y).mean()
+    print(f"[{args.name}] field_tmpl masked:   {ftmpl_m_acc:.1f}%  ({time.time()-t0:.0f}s)", flush=True)
+
     # Baseline: domain-masked calibrated norm
     print(f"[{args.name}] computing baseline masked-calib readout...", flush=True)
     base_acc = raw_masked_acc(field, te_xs, te_ys, lo, hi,
@@ -178,6 +206,8 @@ def main():
         'baseline_masked_calib': round(base_acc, 1),
         'template_unmasked':     round(tmpl_acc, 1),
         'template_masked':       round(tmpl_m_acc, 1),
+        'field_tmpl_unmasked':   round(ftmpl_acc, 1),
+        'field_tmpl_masked':     round(ftmpl_m_acc, 1),
         'probe_ceiling_mnist':   86.6,   # from eval_full run
     }
     json.dump(report, open(args.out, 'w'), indent=2)
