@@ -2461,6 +2461,13 @@ class UERFExperience:
 
             # Learning phase
             if learn:
+                # Update neuromodulators FIRST, from the settled post-relaxation
+                # field, so the DA computed from THIS input's prediction error
+                # gates THIS input's bond update (C += lr·ACh·DA·ΔC). If bonds
+                # were learned before DA refreshed, the error on input t would
+                # modulate input t+1 — a one-step credit misassignment.
+                self._update_neuromodulators()
+
                 self._learn_bonds()
                 self._identity_drift()
 
@@ -2471,9 +2478,6 @@ class UERFExperience:
                     input_sig = (x.unsqueeze(-1) * self.c[:self.input_dim]).sum(0)
                     _lrc = 0.001 if self.fixes.get('fix4') else 0.005
                     self._competitive_c_learning(input_sig=input_sig, lr_c=_lrc)
-
-                # Update neuromodulators from the brain's current field state
-                self._update_neuromodulators()
 
                 # Phantom birth and emergent growth triggers, calibrated to
                 # match the contradiction signal's real range. After the
