@@ -708,6 +708,8 @@ class UERFField:
         self._mean_valence_prev = 0.0
         # per-input surprise = current deviation² / typical deviation (1.0=typical)
         self._input_surprise = 1.0
+        # 1.0=brain was correct before teaching, 0.0=wrong, 0.5=unknown/no label
+        self._prediction_correct = 0.5
 
     # ── Helpers ──
     def energy(self):
@@ -2280,14 +2282,18 @@ class UERFLearning:
         self._neuro['ach'] = float(max(0.5, min(1.5,
             0.9 * self._neuro['ach'] + 0.1 * ach_target)))
 
-        # --- DA: temporal Δvalence — reward prediction error (RPE) ---
-        # Rises when valence improves; falls at plateau or decline.
-        # Independent of ACh: governs credit (which bonds to strengthen) not
-        # overall plasticity gate. Now decoupled from ACh at the bond LR site.
+        # --- DA: class prediction error + Δvalence (closed-loop RPE) ---
+        # Biological DA fires on unexpected outcomes:
+        #   wrong prediction → DA burst → bonds potentiate (learn harder from mistake)
+        #   correct prediction → DA dip → bonds stable (consolidate what works)
+        # pred_error=1.0 when wrong, 0.0 when correct, 0.5 when no label (inference)
         delta_v = mean_v - self._mean_valence_prev
         self._mean_valence_prev = mean_v
+        pred_error = 1.0 - float(getattr(self, '_prediction_correct', 0.5))
+        da_from_error   = 0.3 * (pred_error - 0.5)   # wrong→+0.15, correct→-0.15
+        da_from_valence = 0.2 * math.tanh(delta_v * 10)
         self._neuro['da'] = float(max(0.7, min(1.3,
-            1.0 + 0.3 * math.tanh(delta_v * 10))))
+            1.0 + da_from_error + da_from_valence)))
 
         # --- NA: spatial field variance + temporal surprise ---
         # Spatial: high vi.std() → heterogeneous field → uncertain → higher NA
@@ -2411,6 +2417,20 @@ class UERFExperience:
             # Inject sensory input
             if self.input_dim is not None:
                 self.s[:self.input_dim] = x.unsqueeze(-1) * self.c[:self.input_dim]
+
+            # Read brain's current belief BEFORE teaching signal is applied.
+            # This is the closed-loop DA feedback: was the brain's prediction
+            # correct given what it already knows? Wrong → DA burst → learn harder.
+            if teaching_vector is not None and self.t_start is not None and learn:
+                pre_scores = self.predict()
+                if pre_scores is not None:
+                    pre_class = int(pre_scores.argmax().item())
+                    true_class = int(teaching_vector.argmax().item())
+                    self._prediction_correct = float(pre_class == true_class)
+                else:
+                    self._prediction_correct = 0.5
+            elif teaching_vector is None:
+                self._prediction_correct = 0.5  # inference mode — no label available
 
             # Pin teaching signal during learning
             pin_teach = None
