@@ -84,6 +84,7 @@ def run_neuro(hf_token: str, neuro_enabled: bool, n_train_steps: int = 0) -> dic
     acc_before = eval_mnist(1000, "before")
 
     neuro_trace = []
+    da_when_wrong, da_when_right = [], []
     if n_train_steps > 0:
         print(f"\n── Training: {n_train_steps} MNIST steps (neuro={neuro_enabled}) ──",
               flush=True)
@@ -96,16 +97,37 @@ def run_neuro(hf_token: str, neuro_enabled: bool, n_train_steps: int = 0) -> dic
             tv = torch.zeros(field.n_classes, device=dev)
             tv[lbl] = 1.0
             field.experience(x, teaching_vector=tv, n_relax=6)
+            # Closed-loop check: did the brain predict right BEFORE teaching,
+            # and what did DA do in response? (set inside experience())
+            pc = getattr(field, "_prediction_correct", 0.5)
+            da = field._neuro["da"]
+            if pc >= 0.5:
+                da_when_right.append(da)
+            else:
+                da_when_wrong.append(da)
             if (step + 1) % 200 == 0:
                 nm = field._neuro.copy()
                 print(f"  step {step+1:4d}: ACh={nm['ach']:.3f} DA={nm['da']:.3f} "
-                      f"NA={nm['na']:.3f} Sero={nm['sero']:.3f}", flush=True)
+                      f"NA={nm['na']:.3f} Sero={nm['sero']:.3f}  "
+                      f"(last pred {'RIGHT' if pc >= 0.5 else 'WRONG'})", flush=True)
                 neuro_trace.append({'step': step + 1, **{k: round(v, 4) for k, v in nm.items()}})
 
         print("\n── Post-training eval ──", flush=True)
         acc_after = eval_mnist(1000, "after")
     else:
         acc_after = acc_before
+
+    def _mean(lst):
+        return round(sum(lst) / len(lst), 4) if lst else None
+
+    da_wrong_mean = _mean(da_when_wrong)
+    da_right_mean = _mean(da_when_right)
+    print(f"\n[neuro={neuro_enabled}] CLOSED-LOOP DA CHECK:", flush=True)
+    print(f"  steps WRONG: {len(da_when_wrong):4d}  mean DA = {da_wrong_mean}", flush=True)
+    print(f"  steps RIGHT: {len(da_when_right):4d}  mean DA = {da_right_mean}", flush=True)
+    if da_wrong_mean is not None and da_right_mean is not None:
+        print(f"  ΔDA (wrong − right) = {round(da_wrong_mean - da_right_mean, 4)} "
+              f"(>0 ⇒ loop fires: learns harder on misses)", flush=True)
 
     return {
         "neuro_enabled": neuro_enabled,
@@ -114,6 +136,10 @@ def run_neuro(hf_token: str, neuro_enabled: bool, n_train_steps: int = 0) -> dic
         "acc_after":  round(acc_after,  1),
         "neuro_levels_final": {k: round(v, 4) for k, v in field._neuro.items()},
         "neuro_trace": neuro_trace,
+        "da_when_wrong_mean": da_wrong_mean,
+        "da_when_right_mean": da_right_mean,
+        "n_wrong": len(da_when_wrong),
+        "n_right": len(da_when_right),
     }
 
 
@@ -157,6 +183,15 @@ def main(token):
     for row in r_on_tr['neuro_trace']:
         print(f"  step {row['step']:4d}  ACh={row['ach']:.4f}  DA={row['da']:.4f}  "
               f"NA={row['na']:.4f}  Sero={row['sero']:.4f}")
+
+    print()
+    print("CLOSED-LOOP DA (prediction error → plasticity):")
+    dw, dr = r_on_tr.get('da_when_wrong_mean'), r_on_tr.get('da_when_right_mean')
+    print(f"  mean DA when WRONG ({r_on_tr.get('n_wrong')} steps): {dw}")
+    print(f"  mean DA when RIGHT ({r_on_tr.get('n_right')} steps): {dr}")
+    if dw is not None and dr is not None:
+        print(f"  ΔDA (wrong − right) = {round(dw - dr, 4)}  "
+              f"(>0 ⇒ brain learns harder from its mistakes)")
 
     results = {"neuro_off": r_off, "neuro_on_train": r_on_tr}
     out = os.path.join(os.path.dirname(__file__), "neuro_results.json")
