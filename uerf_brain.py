@@ -2363,6 +2363,29 @@ class UERFExperience:
                     0.99 * self._input_running_var + 0.01 * diff ** 2
                 )
 
+            # ── Closed-loop prediction error (drives DA) ───────────────────────
+            # Before learning, read the brain's GENUINE belief about THIS input:
+            # a non-destructive eval_predict relaxes the field from the current
+            # consolidated state (teach slots zeroed, bond-driven) and restores
+            # everything afterward. Comparing that prediction to the true label
+            # gives reward-prediction-error: wrong → DA burst → bonds potentiate
+            # harder; right → DA dip → consolidate. Must run BEFORE the decay /
+            # sensory-injection below mutate self.s, so it matches a standalone
+            # eval exactly. neuro_enabled gates it — zero overhead when off.
+            if (learn and self.neuro_enabled and teaching_vector is not None
+                    and self.t_start is not None):
+                _, pre_scores = self.eval_predict(x, n_relax=n_relax,
+                                                  return_scores=True)
+                if pre_scores is not None:
+                    pre_class  = int(pre_scores.argmax().item())
+                    true_class = int(teaching_vector.argmax().item())
+                    self._prediction_correct = float(pre_class == true_class)
+                else:
+                    self._prediction_correct = 0.5
+            else:
+                # inference, or neuro off, or no label → neutral (DA stays ~1.0)
+                self._prediction_correct = 0.5
+
             # This creates SPARSE, PATTERN-SPECIFIC representations:
             # - Each input activates a DIFFERENT subset of interior oscillators
             # - Oscillators whose identity (c) aligns with the input get boosted
@@ -2417,20 +2440,6 @@ class UERFExperience:
             # Inject sensory input
             if self.input_dim is not None:
                 self.s[:self.input_dim] = x.unsqueeze(-1) * self.c[:self.input_dim]
-
-            # Read brain's current belief BEFORE teaching signal is applied.
-            # This is the closed-loop DA feedback: was the brain's prediction
-            # correct given what it already knows? Wrong → DA burst → learn harder.
-            if teaching_vector is not None and self.t_start is not None and learn:
-                pre_scores = self.predict()
-                if pre_scores is not None:
-                    pre_class = int(pre_scores.argmax().item())
-                    true_class = int(teaching_vector.argmax().item())
-                    self._prediction_correct = float(pre_class == true_class)
-                else:
-                    self._prediction_correct = 0.5
-            elif teaching_vector is None:
-                self._prediction_correct = 0.5  # inference mode — no label available
 
             # Pin teaching signal during learning
             pin_teach = None
