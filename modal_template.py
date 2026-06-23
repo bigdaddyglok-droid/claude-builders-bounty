@@ -14,7 +14,12 @@ app = modal.App("uerf-template", image=image)
 HF_DATASET = "BlackLoks/uerf-checkpoints"
 
 
-@app.function(gpu="A10G", timeout=7200, memory=46080, cpu=8.0)
+# balanced calibration: ~30 examples PER CLASS in every domain (not first-N,
+# which lands a single class on TinyImageNet's class-sorted ImageFolder)
+PER_CLASS = 30
+
+
+@app.function(gpu="A100-40GB", timeout=7200, memory=80000, cpu=8.0)
 def run_template(domain: str, ckpt_filename: str, hf_token: str) -> dict:
     import os, sys, json, subprocess, shutil
     from huggingface_hub import hf_hub_download
@@ -37,7 +42,7 @@ def run_template(domain: str, ckpt_filename: str, hf_token: str) -> dict:
     out  = os.path.join(ws, f"tmpl_{domain}.json")
     cmd  = [sys.executable, os.path.join(ws, "eval_template.py"),
             "--ckpt", ckpt, "--name", "phase3", "--domain", domain,
-            "--n_eval", "2000", "--n_calib", "500",
+            "--n_eval", "2000", "--per_class", str(PER_CLASS),
             "--n_relax", "8", "--seed", "42", "--out", out]
     r = subprocess.run(cmd, cwd=ws)
     if r.returncode == 0 and os.path.exists(out):

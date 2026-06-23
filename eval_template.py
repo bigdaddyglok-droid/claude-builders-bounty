@@ -27,15 +27,52 @@ DOMAINS = {
 }
 
 
-def build_features(loader_name, n_items, split, seed, device, class_offset):
+def _dataset_labels(ds):
+    """Cheap label list without decoding images."""
+    if hasattr(ds, 'targets'):
+        t = ds.targets
+        return t.tolist() if torch.is_tensor(t) else list(t)
+    if hasattr(ds, '_labels'):
+        return list(ds._labels)
+    return [ds[i][1] for i in range(len(ds))]
+
+
+def build_features(loader_name, n_items, split, seed, device, class_offset,
+                   balanced_per_class=None):
+    """Build (feature, offset-label) pairs.
+
+    balanced_per_class:  if set, sample exactly k examples PER CLASS (random
+        within each class). Required for class-sorted datasets like TinyImageNet's
+        ImageFolder, where sequential/first-N sampling would draw a single class.
+    otherwise: random sample of n_items across the whole split (also class-sorted
+        safe — never first-N sequential).
+    """
     import uerf_lifetime as L
     encoder = L.UniversalEncoder(device=device)
     proj = U.SensoryProjection(512, L.CONFIG['n_sensory'], seed=seed)
     proj.to(device)
     tr, te = getattr(L, loader_name)()
     ds = te if split == 'test' else tr
+
+    if balanced_per_class is not None:
+        import collections, random
+        rng = random.Random(seed)
+        labels = _dataset_labels(ds)
+        by_cls = collections.defaultdict(list)
+        for i, lb in enumerate(labels):
+            by_cls[int(lb)].append(i)
+        indices = []
+        for lb, idxs in by_cls.items():
+            rng.shuffle(idxs)
+            indices.extend(idxs[:balanced_per_class])
+        rng.shuffle(indices)
+    else:
+        g = torch.Generator().manual_seed(seed)
+        n = min(n_items, len(ds))
+        indices = torch.randperm(len(ds), generator=g)[:n].tolist()
+
     xs, ys = [], []
-    for i in range(min(n_items, len(ds))):
+    for i in indices:
         img, lbl = ds[i]
         feat = encoder.encode(img.unsqueeze(0))[0]
         x = proj(feat)
@@ -95,6 +132,7 @@ def main():
     ap.add_argument('--domain',   default='mnist', choices=list(DOMAINS))
     ap.add_argument('--n_eval',   type=int, default=2000)
     ap.add_argument('--n_calib',  type=int, default=500)   # labeled examples for templates
+    ap.add_argument('--per_class', type=int, default=0)    # >0: balanced k-per-class calibration
     ap.add_argument('--n_relax',  type=int, default=8)
     ap.add_argument('--seed',     type=int, default=42)
     ap.add_argument('--out',      default='eval_template.json')
@@ -111,8 +149,13 @@ def main():
           f"exp={int(field.experience_count)}", flush=True)
 
     # ── Labeled TRAIN split → fit templates ────────────────────────────────────
-    print(f"[{args.name}] building {args.n_calib} labeled train features for templates...", flush=True)
-    tr_xs, tr_ys = build_features(loader, args.n_calib, 'train', args.seed, dev, lo)
+    bpc = args.per_class if args.per_class > 0 else None
+    if bpc:
+        print(f"[{args.name}] building balanced calibration: {bpc}/class × {ncls} classes...", flush=True)
+    else:
+        print(f"[{args.name}] building {args.n_calib} labeled train features for templates...", flush=True)
+    tr_xs, tr_ys = build_features(loader, args.n_calib, 'train', args.seed, dev, lo,
+                                  balanced_per_class=bpc)
     print(f"[{args.name}] fitting teach templates ({len(tr_xs)} examples)...", flush=True)
     t0 = time.time()
     n_fit = field.fit_teach_templates(tr_xs, tr_ys, n_relax=args.n_relax,
