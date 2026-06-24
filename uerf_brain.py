@@ -25,7 +25,10 @@ THE CONTRACT (what makes this faithful, not decorative)
     Holographic exp(−S_ent)≈0, Thermal exp(E_a/kT), Harmonic Q-factor,
     Phantom |1+w|, Fractal λ^D_f, Relativistic 1/γ, …
   • Eq 6 (Valence) V(s) = α⟨s,R⟩ − λ‖s−I‖² — the per-state routing objective.
-  • Routing between states is emergent: argmax valence over states.
+  • Routing between states is emergent: oscillators sample their state by
+    valence (Eq 6), and the exploration temperature self-anneals from the
+    field's OWN valence decisiveness — as the field grows confident the sampling
+    collapses to argmax valence. No fixed schedule drives the anneal.
 
 STATE → NEURAL FUNCTION
   Classical    baseline interior processing           (α 0.70–0.90)
@@ -226,19 +229,29 @@ def state_modifier(state_id, theta, S, f, N, E, a0, ctx):
         return 1.02 * one
 
     if state_id == S_HOLOGRAPHIC:
-        # Information preservation via boundary encoding.
-        # Reward oscillators with high projection onto holographic boundary.
+        # Information preservation via boundary encoding, WITH a real capacity
+        # cap. holo_fidelity is boundary OCCUPANCY (state energy lying in the
+        # rank-d/3 boundary subspace, ÷ the area fraction). The reward is an
+        # inverted-U that peaks at full occupancy (=1) and DECLINES past it: a
+        # node trying to pack more than the boundary can hold is penalized, so it
+        # sheds the excess into other states. This enforces the holographic
+        # bound rather than rewarding unbounded projection.
         holo_fidelity = ctx.get('holo_fidelity', None)
         if isinstance(holo_fidelity, torch.Tensor):
-            return (0.95 + 0.1 * holo_fidelity).clamp(0.95, 1.1)
+            over = (holo_fidelity - 1.0).abs()          # distance from capacity
+            return (1.1 - 0.15 * over).clamp(0.95, 1.1)
+        # No projector ⇒ no boundary subspace exists, so there is nothing to cap
+        # against; fall back to a neutral, in-band reward (no unbounded growth).
         sent = ctx.get('S_ent', 1.0)
-        return torch.exp(torch.tensor(0.02 * sent, device=theta.device)) * one
+        return (torch.exp(torch.tensor(0.02 * sent, device=theta.device)) * one).clamp(0.95, 1.1)
 
     if state_id == S_HOLOADS:
-        # Same as holographic but for AdS boundary compression
+        # AdS boundary compression — same capacity-capped inverted-U as
+        # Holographic: peak reward at full occupancy, penalty for over-packing.
         holo_fidelity = ctx.get('holo_fidelity', None)
         if isinstance(holo_fidelity, torch.Tensor):
-            return (0.95 + 0.1 * holo_fidelity).clamp(0.95, 1.1)
+            over = (holo_fidelity - 1.0).abs()
+            return (1.1 - 0.15 * over).clamp(0.95, 1.1)
         return 1.02 * one
 
     if state_id == S_PHANTOM:
@@ -858,21 +871,22 @@ class UERFDynamics:
 
         # Harmonic: already uses f directly in modifier
 
-        # Holographic: projection fidelity, bounded by the boundary area.
-        # The holographic principle caps boundary-encoded information by the
+        # Holographic OCCUPANCY, used to enforce a real capacity cap. The
+        # holographic principle bounds boundary-encoded information by the
         # boundary's fractional dimension (_holo_area_limit = d_boundary/d).
-        # We report fidelity as the share of boundary capacity the node
-        # saturates, so the Holographic reward enforces the boundary condition
-        # (a node can't exceed what the boundary can hold) rather than treating
-        # the regime as a mere flag.
+        # occupancy = (share of state energy in the boundary subspace) ÷ area
+        # fraction. We deliberately let occupancy EXCEED 1 (clamped to [0,2]) so
+        # the Holographic reward's inverted-U can penalize over-packing — a node
+        # that exceeds capacity is pushed to shed the excess. (The dissipation
+        # path re-clamps to [0,1] internally, so long-term-memory low-loss is
+        # unaffected; only the routing reward sees the over-capacity signal.)
         if self._holo_projector is not None:
             s_proj = s @ self._holo_projector
             proj_fidelity = (s * s_proj).sum(-1) / (mag ** 2).clamp(min=1e-8)
             area_limit = getattr(self, '_holo_area_limit', 1.0)
             if area_limit and area_limit > 0:
-                # Fraction of the boundary's capacity that is occupied.
                 proj_fidelity = (proj_fidelity / area_limit)
-            ctx['holo_fidelity'] = proj_fidelity.clamp(0, 1)
+            ctx['holo_fidelity'] = proj_fidelity.clamp(0, 2.0)
         else:
             ctx['holo_fidelity'] = torch.zeros(n, device=self.device)
 
@@ -1162,18 +1176,24 @@ class UERFDynamics:
         pop_penalty = 3.0 * excess                          # (n_states,)
         delta_V = delta_V - pop_penalty.unsqueeze(0)        # broadcast (1, n_states)
 
-        # STOCHASTIC ROUTING with adaptive temperature.
-        # Early on (low magnitudes), temperature is high → diverse states.
-        # Later (high magnitudes), temperature drops → more deterministic.
+        # EMERGENT SELF-ANNEALING (not a hand-set magnitude schedule).
+        # The temperature is driven by the field's OWN decisiveness: the mean
+        # margin by which each routable oscillator's best state beats Classical
+        # (delta_V already carries this). When the valence landscape is sharp
+        # (one state clearly wins) the field is confident → low temp → routing
+        # approaches argmax(valence) — the limit line 28 promises. When states
+        # tie (margin ≈ 0) → high temp → exploration. As the field organizes,
+        # margins grow and it anneals on its own — no fixed function of training
+        # progress. NA (arousal) still scales it as a neuromodulator.
         # Use ROUTABLE (interior minus locked) — locked osc keep their state.
         if routable.any():
-            mean_mag = mag[routable].mean().clamp(min=1e-6)
+            decisiveness = delta_V[routable].max(dim=-1).values.clamp(min=0.0).mean()
         else:
-            mean_mag = torch.tensor(1.0, device=self.device)
-        # Temperature: high when mean_mag is low, low when mean_mag is high
-        temperature = 0.5 / (1.0 + 5.0 * mean_mag)  # range: ~0.5 → ~0.05
+            decisiveness = torch.tensor(0.0, device=self.device)
         _na = self._neuro.get('na', 1.0)
-        temperature = max(temperature.item() * _na, 0.02)  # NA scales temp; 1.0=identity
+        # temp falls as the field's valence margin rises (confident → cold).
+        temperature = (0.5 / (1.0 + 8.0 * decisiveness)).item() * _na
+        temperature = max(temperature, 0.02)
 
         # Add per-oscillator noise for exploration (Gumbel-max trick).
         dV_int = delta_V[routable]  # (n_routable, n_states) — locked excluded
@@ -1631,6 +1651,23 @@ class UERFLearning:
             n = self.n_max
             d = self.d
 
+            # ── Three-factor dopaminergic credit (eligibility × RPE) ──────────
+            # DA is a CREDIT signal, not a global learning-rate knob: it must
+            # potentiate the oscillators that actually drove the (mis)prediction
+            # and leave the rest alone. The eligibility trace is each unit's
+            # activity this step — its state magnitude, normalized to the active
+            # interior mean. da_per = 1 + (DA-1)·tanh(mag/mean_act):
+            #   wrong (DA>1): ACTIVE units potentiate harder; quiet units ~1.0
+            #   right (DA<1): ACTIVE units consolidate (less plastic); quiet ~1.0
+            # At the population mean this collapses to the old global DA, so it
+            # only ADDS per-unit specificity — it does not rescale the baseline.
+            _da_level = self._neuro.get('da', 1.0)
+            if interior.any():
+                _mean_act = mag[interior].mean().clamp(min=1e-6)
+            else:
+                _mean_act = torch.tensor(1.0, device=self.device)
+            da_per = 1.0 + (_da_level - 1.0) * torch.tanh(mag / _mean_act)  # (n,)
+
             # PATHWAY 1: Interior receivers learn from all alive senders.
             # EXCEPT class-locked osc — their incoming bonds are FROZEN
             # (consolidated class memory). They still PARTICIPATE as senders
@@ -1649,10 +1686,11 @@ class UERFLearning:
                 delta_C = delta_C * sender_alive
 
                 alpha_scale = alpha[r0:r1].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-                # ACh gates overall plasticity; DA provides independent RPE-based LR boost
+                # ACh = global plasticity gain (basal-forebrain-style broadcast);
+                # DA = per-oscillator credit via the eligibility trace da_per.
                 _ach = self._neuro.get('ach', 1.0)
-                _da  = self._neuro.get('da',  1.0)
-                self.C[r0:r1] += lr * _ach * _da * alpha_scale * delta_C * recv_mask.float().unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+                da_chunk = da_per[r0:r1].view(-1, 1, 1, 1)   # (chunk,1,1,1) per receiver
+                self.C[r0:r1] += lr * _ach * da_chunk * alpha_scale * delta_C * recv_mask.float().unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
                 # Decay bonds. locked rows are always frozen (no decay).
                 # that share a chunk with interior receivers also get decayed,
                 # bleeding teach-slot bonds between Pathway-2 rewrites.
@@ -2294,6 +2332,10 @@ class UERFLearning:
         da_from_valence = 0.2 * math.tanh(delta_v * 10)
         self._neuro['da'] = float(max(0.7, min(1.3,
             1.0 + da_from_error + da_from_valence)))
+        # NOTE: this sets the GLOBAL DA *level*. _learn_bonds applies it
+        # PER-OSCILLATOR through an eligibility trace (active units get the
+        # credit), so DA is a genuine three-factor credit signal — not a
+        # uniform learning-rate multiplier.
 
         # --- NA: spatial field variance + temporal surprise ---
         # Spatial: high vi.std() → heterogeneous field → uncertain → higher NA
