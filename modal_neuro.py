@@ -1,34 +1,27 @@
 """
-modal_neuro.py — Validate full neuromodulator system on Phase 3 checkpoint.
+neuro_validate.py — Validate full neuromodulator system on Phase 3 checkpoint.
 
 Phase A (identity baseline): load Phase 3 ckpt, eval MNIST with neuro_enabled=False.
 Phase B (neuro enabled):     load Phase 3 ckpt, run 1000 MNIST steps, log neuro traces,
                               re-eval accuracy and compare.
-Phase C (neuro ON, no extra training): just turn on neuro, eval immediately — to
-                              confirm neuro_enabled=True is a drop-in (no regression).
 
-The runner uploads the local uerf_brain.py to HF as neuro_brain.py before launch.
+Raw pixel input — no pretrained encoder, no ML calibration. Fixed random projection only.
+
+Run: python neuro_validate.py <hf_token>
+Requires: GPU, uerf_brain.py and uerf_lifetime.py in sys.path or same dir.
 """
-import modal
+import os, sys, json, math, shutil
+import torch
+from huggingface_hub import hf_hub_download
 
-image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .pip_install("torch==2.4.0", "torchvision==0.19.0", "numpy",
-                 "scikit-learn", "huggingface_hub", "pillow")
-)
-app = modal.App("uerf-neuro", image=image)
 HF_DATASET = "BlackLoks/uerf-checkpoints"
 
 
-@app.function(gpu="A10G", timeout=7200, memory=46080, cpu=8.0)
 def run_neuro(hf_token: str, neuro_enabled: bool, n_train_steps: int = 0) -> dict:
-    import os, sys, json, math, shutil
-    import torch
-    from huggingface_hub import hf_hub_download
-
     ws = "/tmp/uerf_neuro"
     os.makedirs(ws, exist_ok=True)
-    sys.path.insert(0, ws)
+    if ws not in sys.path:
+        sys.path.insert(0, ws)
 
     def grab(fn, rename=None):
         p = hf_hub_download(repo_id=HF_DATASET, repo_type="dataset",
@@ -43,10 +36,11 @@ def run_neuro(hf_token: str, neuro_enabled: bool, n_train_steps: int = 0) -> dic
     grab("phase3_main.pt")
     grab("eval_full.py")
 
-    import uerf_brain as U
-    import uerf_lifetime as L
+    import importlib
+    U = importlib.import_module("uerf_brain")
+    L = importlib.import_module("uerf_lifetime")
 
-    dev = "cuda"
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
     ckpt = os.path.join(ws, "phase3_main.pt")
     field = U.UERFField.load_checkpoint(ckpt, device=dev)
     field.neuro_enabled = neuro_enabled
@@ -55,20 +49,17 @@ def run_neuro(hf_token: str, neuro_enabled: bool, n_train_steps: int = 0) -> dic
           f"neuro_enabled={field.neuro_enabled}, "
           f"initial levels={field._neuro}", flush=True)
 
-    encoder = L.UniversalEncoder(device=dev)
-    proj = U.SensoryProjection(512, L.CONFIG['n_sensory'], seed=42)
+    # Raw pixel projection — no pretrained encoder, no statistical calibration.
+    # MNIST images are 1×28×28; flatten to 784 floats, fixed random project to n_sensory.
+    proj = U.SensoryProjection(784, L.CONFIG['n_sensory'], seed=42)
     proj.to(dev)
     _, te = L.load_mnist()
 
     def eval_mnist(n=1000, tag=""):
         correct_raw = 0
-        field.calibrate_readout([
-            proj(encoder.encode(te[i][0].unsqueeze(0))[0])
-            for i in range(200)
-        ])
         for i in range(n):
             img, lbl = te[i]
-            x = proj(encoder.encode(img.unsqueeze(0))[0])
+            x = proj(img.view(-1).to(dev))
             x = x / x.norm().clamp(min=1e-6)
             pred, scores = field.eval_predict(x, n_relax=8, return_scores=True)
             # domain-restrict to MNIST slots [0:10]
@@ -92,7 +83,7 @@ def run_neuro(hf_token: str, neuro_enabled: bool, n_train_steps: int = 0) -> dic
         for step in range(n_train_steps):
             idx = step % len(tr)
             img, lbl = tr[idx]
-            x = proj(encoder.encode(img.unsqueeze(0))[0])
+            x = proj(img.view(-1).to(dev))
             x = x / x.norm().clamp(min=1e-6)
             tv = torch.zeros(field.n_classes, device=dev)
             tv[lbl] = 1.0
@@ -144,7 +135,6 @@ def run_neuro(hf_token: str, neuro_enabled: bool, n_train_steps: int = 0) -> dic
 
 
 def main(token):
-    import json, os
     from huggingface_hub import HfApi
 
     api = HfApi(token=token)
@@ -159,13 +149,10 @@ def main(token):
     )
     print("[main] upload done", flush=True)
 
-    # Run in parallel: neuro=OFF baseline + neuro=ON with training
-    import concurrent.futures
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-        f_off   = ex.submit(run_neuro.remote, token, False, 0)
-        f_on_tr = ex.submit(run_neuro.remote, token, True,  1000)
-        r_off   = f_off.result()
-        r_on_tr = f_on_tr.result()
+    print("[main] running neuro=OFF baseline ...", flush=True)
+    r_off   = run_neuro(token, False, 0)
+    print("[main] running neuro=ON + 1000 train steps ...", flush=True)
+    r_on_tr = run_neuro(token, True,  1000)
 
     print("\n\n" + "=" * 65)
     print("NEUROMODULATION REPORT — Phase 3 checkpoint / MNIST")
@@ -199,3 +186,10 @@ def main(token):
         json.dump(results, f, indent=2)
     print(f"\n[main] results written to {out}", flush=True)
     return results
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python neuro_validate.py <hf_token>")
+        sys.exit(1)
+    main(sys.argv[1])
