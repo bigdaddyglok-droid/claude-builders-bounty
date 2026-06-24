@@ -15,6 +15,22 @@ import torch
 from huggingface_hub import hf_hub_download
 
 HF_DATASET = "BlackLoks/uerf-checkpoints"
+N_SENSORY   = 128   # matches CONFIG['n_sensory'] in uerf_lifetime
+
+
+def load_mnist_hf():
+    """Load MNIST via HuggingFace datasets — avoids dead torchvision URLs."""
+    from datasets import load_dataset
+    ds = load_dataset("ylecun/mnist", trust_remote_code=True)
+    def to_tensor_pairs(split):
+        pairs = []
+        for row in split:
+            img = torch.tensor(list(row['image'].getdata()), dtype=torch.float32) / 255.0
+            pairs.append((img, int(row['label'])))
+        return pairs
+    tr = to_tensor_pairs(ds['train'])
+    te = to_tensor_pairs(ds['test'])
+    return tr, te
 
 
 def run_neuro(hf_token: str, neuro_enabled: bool, n_train_steps: int = 0) -> dict:
@@ -31,14 +47,11 @@ def run_neuro(hf_token: str, neuro_enabled: bool, n_train_steps: int = 0) -> dic
             shutil.copy(p, t)
         return os.path.join(ws, rename or fn)
 
-    grab("neuro_brain.py",    rename="uerf_brain.py")
-    grab("phase2_lifetime.py", rename="uerf_lifetime.py")
+    grab("neuro_brain.py", rename="uerf_brain.py")
     grab("phase3_main.pt")
-    grab("eval_full.py")
 
     import importlib
     U = importlib.import_module("uerf_brain")
-    L = importlib.import_module("uerf_lifetime")
 
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     ckpt = os.path.join(ws, "phase3_main.pt")
@@ -50,10 +63,13 @@ def run_neuro(hf_token: str, neuro_enabled: bool, n_train_steps: int = 0) -> dic
           f"initial levels={field._neuro}", flush=True)
 
     # Raw pixel projection — no pretrained encoder, no statistical calibration.
-    # MNIST images are 1×28×28; flatten to 784 floats, fixed random project to n_sensory.
-    proj = U.SensoryProjection(784, L.CONFIG['n_sensory'], seed=42)
+    # MNIST images are 1×28×28 = 784 floats, fixed random project to N_SENSORY.
+    proj = U.SensoryProjection(784, N_SENSORY, seed=42)
     proj.to(dev)
-    _, te = L.load_mnist()
+
+    print("[data] loading MNIST via HuggingFace datasets ...", flush=True)
+    tr, te = load_mnist_hf()
+    print(f"[data] {len(tr)} train / {len(te)} test", flush=True)
 
     def eval_mnist(n=1000, tag=""):
         correct_raw = 0
@@ -79,7 +95,7 @@ def run_neuro(hf_token: str, neuro_enabled: bool, n_train_steps: int = 0) -> dic
     if n_train_steps > 0:
         print(f"\n── Training: {n_train_steps} MNIST steps (neuro={neuro_enabled}) ──",
               flush=True)
-        tr, _ = L.load_mnist()
+        # tr already loaded above
         for step in range(n_train_steps):
             idx = step % len(tr)
             img, lbl = tr[idx]
