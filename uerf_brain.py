@@ -2540,6 +2540,48 @@ class UERFExperience:
             return (norms - mu) / sd.clamp(min=1e-6)
         return norms
 
+    def predict_aware(self):
+        """Self-aware readout: magnitude × holographic quality gate.
+
+        The holographic projector (built from SVD of all teach c-vectors at init)
+        encodes the manifold of genuine class activations. During inference,
+        a teach slot that's activated AND lies on that manifold is more
+        trustworthy than one activated off-manifold (noise, cross-domain bleed).
+
+        This is NOT a class discriminator — the projector is global. It's a
+        per-slot confidence multiplier that keeps magnitude as the carrier:
+
+            score_k = norm_k × (0.5 + 0.5 × holo_alignment_k)
+
+        On-manifold slots get 100% weight; off-manifold slots get 50%.
+        Falls back to plain predict() when no projector is available.
+
+        Calibration: z-score de-bias applied to norms first, same as predict().
+        """
+        if self.t_start is None:
+            return None
+
+        teach_s = self.s[self.t_start:self.t_end]    # (n_classes, d)
+        norms   = teach_s.norm(dim=-1)               # carrier signal
+
+        mu = getattr(self, '_readout_mu', None)
+        sd = getattr(self, '_readout_sigma', None)
+        if mu is not None and sd is not None:
+            norms = (norms - mu) / sd.clamp(min=1e-6)
+
+        if self._holo_projector is None:
+            return norms
+
+        # Per-slot holographic alignment: how much of each slot's state vector
+        # lies within the teach manifold (the low-rank subspace of teach c-vectors)?
+        # Formula: dot(P·s, s) / ‖s‖² — scale-invariant measure of on-manifold-ness.
+        norms_raw  = teach_s.norm(dim=-1).clamp(min=1e-8)   # before calibration
+        holo_proj  = teach_s @ self._holo_projector          # (n_classes, d)
+        holo_a     = (holo_proj * teach_s).sum(-1) / (norms_raw ** 2)
+        holo_a     = holo_a.clamp(0.0, 1.0)
+
+        return norms * (0.5 + 0.5 * holo_a)
+
     def calibrate_readout(self, inputs, n_relax=None):
         """Unsupervised, training-free readout calibration. Runs eval-mode
         inference over UNLABELED inputs and records each class slot's mean and
@@ -2738,7 +2780,8 @@ class UERFExperience:
             return int(holder['sims'].argmax())
         return -1
 
-    def eval_predict(self, x, n_relax=None, bond_chunk=256, return_scores=False):
+    def eval_predict(self, x, n_relax=None, bond_chunk=256, return_scores=False,
+                     predict_fn=None):
         """
         Non-destructive evaluation. Save ALL state, run inference, restore.
         fix5: default n_relax 10 instead of 6 (more ticks for bonds to drive
@@ -2832,7 +2875,8 @@ class UERFExperience:
             if tick == n_relax // 2:
                 ctx = self._build_routing_ctx()
 
-        scores = self.predict()
+        _fn   = predict_fn if predict_fn is not None else self.predict
+        scores = _fn()
         result = int(scores.argmax()) if scores is not None else -1
         scores_out = scores.clone() if (return_scores and scores is not None) else None
 
@@ -2845,9 +2889,77 @@ class UERFExperience:
             return result, scores_out
         return result
 
+    def eval_predict_aware(self, x, n_relax=None, domain_lo=None, domain_hi=None):
+        """Non-destructive aware prediction with internal confidence signals.
+
+        Uses predict_aware() (magnitude × holo gate) and captures the brain's
+        internal contradiction level after relaxation — before state is restored.
+        This is the 'knows what it knows' readout: the brain reports its own
+        confidence, not just a class label.
+
+        Returns:
+            pred   : int class index (domain-restricted if lo/hi provided)
+            scores : (n_classes,) aware score tensor
+            meta   : dict with contradiction, ach, holo_mean, field_confidence
+        """
+        if n_relax is None:
+            n_relax = 10 if self.fixes.get('fix5') else 6
+
+        pred_raw, scores = self.eval_predict(
+            x, n_relax=n_relax, return_scores=True,
+            predict_fn=self.predict_aware)
+
+        # eval_predict restored state — re-run to capture internal signals.
+        # Use same save/restore pattern but only need field state after relax.
+        with torch.no_grad():
+            save_s = self.s.clone()
+            x = x.to(self.device)
+            x = x / x.norm().clamp(min=1e-6)
+            if self.input_dim is not None:
+                self.s[:self.input_dim] = x.unsqueeze(-1) * self.c[:self.input_dim]
+            if self.t_start is not None:
+                self.s[self.t_start:self.t_end] = 0.0
+            pin_s = self.s[:self.input_dim].clone() if self.input_dim else None
+            ctx = self._build_routing_ctx()
+            for tick in range(n_relax):
+                self._dynamics_step(ctx, pin_sensory=pin_s, pin_teaching=None)
+                if tick == n_relax // 2:
+                    ctx = self._build_routing_ctx()
+
+            # Capture internal signals from settled field
+            contradiction = float(self._contradiction())
+            holo_mean = 0.0
+            if self._holo_projector is not None and self.t_start is not None:
+                ts = self.s[self.t_start:self.t_end]
+                nr = ts.norm(dim=-1).clamp(min=1e-8)
+                ha = (ts @ self._holo_projector * ts).sum(-1) / (nr ** 2)
+                holo_mean = float(ha.clamp(0, 1).mean())
+
+            self.s = save_s  # restore
+
+        ach  = self._neuro.get('ach', 1.0)
+        novelty = max(0.0, min(1.0, (ach - 1.0) / 0.5))
+        field_confidence = (1.0 - min(1.0, contradiction)) * (1.0 - 0.5 * novelty)
+
+        if domain_lo is not None and domain_hi is not None and scores is not None:
+            sub  = scores[domain_lo:domain_hi]
+            pred = int(sub.argmax()) + domain_lo
+        else:
+            pred = pred_raw
+
+        meta = {
+            'contradiction':    round(contradiction, 4),
+            'ach':              round(ach, 4),
+            'holo_mean':        round(holo_mean, 4),
+            'novelty':          round(novelty, 4),
+            'field_confidence': round(field_confidence, 4),
+        }
+        return pred, scores, meta
+
 
 # Attach experience methods
-for _m in ('experience', 'predict', 'predict_scores', 'eval_predict',
+for _m in ('experience', 'predict', 'predict_aware', 'predict_scores',
+           'eval_predict', 'eval_predict_aware',
            'calibrate_readout', 'fit_teach_templates', 'predict_template',
            'eval_predict_template', '_capture_teach_field', 'build_self_catalog',
            'predict_native', 'eval_predict_native'):
