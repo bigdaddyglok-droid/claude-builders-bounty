@@ -21,11 +21,11 @@ N_SENSORY   = 128   # matches CONFIG['n_sensory'] in uerf_lifetime
 def load_mnist_hf():
     """Load MNIST via HuggingFace datasets — avoids dead torchvision URLs."""
     from datasets import load_dataset
-    ds = load_dataset("ylecun/mnist", trust_remote_code=True)
+    ds = load_dataset("ylecun/mnist")
     def to_tensor_pairs(split):
         pairs = []
         for row in split:
-            img = torch.tensor(list(row['image'].getdata()), dtype=torch.float32) / 255.0
+            img = torch.tensor(list(row['image'].get_flattened_data()), dtype=torch.float32) / 255.0
             pairs.append((img, int(row['label'])))
         return pairs
     tr = to_tensor_pairs(ds['train'])
