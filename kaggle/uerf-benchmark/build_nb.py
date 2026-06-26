@@ -73,7 +73,8 @@ proj = U.SensoryProjection(RAW_DIM, N_SENSORY, seed=42).to(dev)
 # to every input (a "sink" in the raw-magnitude argmax); dividing by its own
 # gain removes that fixed bias, leaving only input-specific selectivity.
 # Uses ONLY the brain's weights (C) — no labels, no calibration corpus.
-GAIN = field.C[field.t_start:field.t_end, :field.t_start].norm(dim=(1, 2, 3)).clamp(min=1e-6)
+_n_slots = field.t_end - field.t_start
+GAIN = field.C[field.t_start:field.t_end, :field.t_start].reshape(_n_slots, -1).norm(dim=1).clamp(min=1e-6)
 print("[native] per-slot sensory-bond gain:",
       [round(float(g), 4) for g in GAIN[:N_TASK]], flush=True)
 
