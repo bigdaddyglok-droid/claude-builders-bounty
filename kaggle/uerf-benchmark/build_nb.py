@@ -22,10 +22,22 @@ import torch
 # Stages 1-3 (statistical / geometric / stochastic) are faithful.
 # ─────────────────────────────────────────────────────────────────────────────
 
-SRC = "/kaggle/input/uerf-train-mnist-from-scratch-uerf-train-py"
-sys.path.insert(0, SRC)
+import glob
+def _find(name):
+    hits = glob.glob(f"/kaggle/input/**/{name}", recursive=True)
+    if not hits:
+        raise FileNotFoundError(f"{name} not found under /kaggle/input")
+    return sorted(hits, key=len)[0]   # shallowest match
+print("[mount] /kaggle/input contents:")
+for p in sorted(glob.glob("/kaggle/input/*")):
+    print("   ", p, flush=True)
+BRAIN_PY = _find("uerf_brain.py")
+CKPT     = _find("main.pt")
+print(f"[mount] brain  = {BRAIN_PY}\n[mount] ckpt   = {CKPT}", flush=True)
+
 import importlib.util
-spec = importlib.util.spec_from_file_location("uerf_brain", os.path.join(SRC, "uerf_brain.py"))
+sys.path.insert(0, os.path.dirname(BRAIN_PY))
+spec = importlib.util.spec_from_file_location("uerf_brain", BRAIN_PY)
 U = importlib.util.module_from_spec(spec); sys.modules["uerf_brain"] = U
 spec.loader.exec_module(U)
 
@@ -33,7 +45,6 @@ dev = "cuda" if torch.cuda.is_available() else "cpu"
 assert dev == "cuda", "GPU REQUIRED — refusing to run on CPU"
 print("device:", torch.cuda.get_device_name(0), flush=True)
 
-CKPT = os.path.join(SRC, "uerf_checkpoints", "main.pt")
 field = U.UERFField.load_checkpoint(CKPT, device=dev)
 field.neuro_enabled = False
 print(f"[brain] n_max={field.n_max} d={field.d} n_classes={field.n_classes} "
