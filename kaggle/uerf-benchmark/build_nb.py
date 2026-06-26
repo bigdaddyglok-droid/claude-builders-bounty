@@ -67,11 +67,39 @@ N_TASK    = 10                       # MNIST digits 0-9
 N_RELAX   = 8
 proj = U.SensoryProjection(RAW_DIM, N_SENSORY, seed=42).to(dev)
 
+# ── PHYSICS-NATIVE PER-SLOT READOUT ──────────────────────────────────────────
+# Each teach slot's response magnitude is divided by the Frobenius norm of its
+# OWN sensor->teach bond block. A slot with large readout bonds responds large
+# to every input (a "sink" in the raw-magnitude argmax); dividing by its own
+# gain removes that fixed bias, leaving only input-specific selectivity.
+# Uses ONLY the brain's weights (C) — no labels, no calibration corpus.
+GAIN = field.C[field.t_start:field.t_end, :field.t_start].norm(dim=(1, 2, 3)).clamp(min=1e-6)
+print("[native] per-slot sensory-bond gain:",
+      [round(float(g), 4) for g in GAIN[:N_TASK]], flush=True)
+
+def scores_native():
+    raw = field.s[field.t_start:field.t_end].norm(dim=-1)
+    return raw / GAIN
+
+_raw_box = {}
+def scores_dual():
+    raw = field.s[field.t_start:field.t_end].norm(dim=-1)
+    _raw_box["pred"] = int(raw[:N_TASK].argmax())   # raw-magnitude prediction
+    return raw / GAIN                               # native scores -> eval argmax
+
 def predict(img_chw01):
-    """img_chw01: (1,28,28) float tensor in [0,1].  -> int prediction 0-9."""
+    """Native readout. img_chw01: (1,28,28) in [0,1] -> int prediction 0-9."""
     x = proj(img_chw01.reshape(-1).to(dev))
-    pred, scores = field.eval_predict(x, n_relax=N_RELAX, return_scores=True)
-    return int(scores[:N_TASK].argmax())
+    pred, _ = field.eval_predict(x, n_relax=N_RELAX, return_scores=True,
+                                 predict_fn=scores_native)
+    return int(pred)
+
+def predict_dual(img_chw01):
+    """One relaxation, two readouts: (raw_pred, native_pred)."""
+    x = proj(img_chw01.reshape(-1).to(dev))
+    pred_native, _ = field.eval_predict(x, n_relax=N_RELAX, return_scores=True,
+                                        predict_fn=scores_dual)
+    return _raw_box["pred"], int(pred_native)
 
 # ── data ─────────────────────────────────────────────────────────────────────
 from torchvision import datasets, transforms
@@ -98,19 +126,36 @@ def run_over(indices, make_tensor, tag):
 
 results = {}
 
-# ── STAGE 1: STATISTICAL BREAKDOWN ───────────────────────────────────────────
+# ── STAGE 1: STATISTICAL BREAKDOWN — RAW vs NATIVE readout (same relaxation) ──
 N1 = 2500
 idx1 = subset_indices(N1, seed=1)
 print(f"\n=== STAGE 1: STATISTICAL BREAKDOWN  (n={N1}, full 10-way) ===", flush=True)
-p1, t1 = run_over(idx1, lambda img: to_tensor(img), "stat")
-print(classification_report(t1, p1, digits=4, zero_division=0))
-cm = confusion_matrix(t1, p1)
-print("Confusion Matrix (rows=true 0-9, cols=pred):")
-print(cm)
-acc1 = float(np.mean(p1 == t1))
-results["accuracy"] = acc1
-results["confusion_matrix"] = cm.tolist()
-print(f"Overall accuracy: {acc1*100:.4f}%", flush=True)
+raw_preds, nat_preds, t1 = [], [], []
+t0 = time.time()
+for k, i in enumerate(idx1):
+    img, lbl = raw_test[i]
+    rp, npd = predict_dual(to_tensor(img))
+    raw_preds.append(rp); nat_preds.append(npd); t1.append(int(lbl))
+    if (k + 1) % 500 == 0:
+        print(f"  [stat] {k+1}/{N1}  {(k+1)/(time.time()-t0):.2f} ex/s", flush=True)
+raw_preds = np.array(raw_preds); nat_preds = np.array(nat_preds); t1 = np.array(t1)
+
+acc_raw = float(np.mean(raw_preds == t1))
+acc_nat = float(np.mean(nat_preds == t1))
+print("\n── RAW magnitude readout (baseline) ──")
+print(classification_report(t1, raw_preds, digits=4, zero_division=0))
+print("Confusion Matrix (raw):"); print(confusion_matrix(t1, raw_preds))
+print(f"RAW overall accuracy: {acc_raw*100:.4f}%")
+print("\n── NATIVE per-slot-normalized readout ──")
+print(classification_report(t1, nat_preds, digits=4, zero_division=0))
+print("Confusion Matrix (native):"); print(confusion_matrix(t1, nat_preds))
+print(f"NATIVE overall accuracy: {acc_nat*100:.4f}%")
+print(f"\n>>> LIFT from native readout: {(acc_nat-acc_raw)*100:+.2f} pp "
+      f"({acc_raw*100:.1f}% -> {acc_nat*100:.1f}%)", flush=True)
+results["accuracy_raw"] = acc_raw
+results["accuracy"] = acc_nat
+results["confusion_matrix_raw"] = confusion_matrix(t1, raw_preds).tolist()
+results["confusion_matrix"] = confusion_matrix(t1, nat_preds).tolist()
 
 # ── STAGE 2: GEOMETRIC INVARIANCE ────────────────────────────────────────────
 ROT, TRANS = 30, 0.15
@@ -186,8 +231,11 @@ print(f"L-inf worst-of-{K} robustness: {adv_acc*100:.4f}%", flush=True)
 # ── SUMMARY ──────────────────────────────────────────────────────────────────
 print("\n" + "=" * 60)
 print(" UERF BENCHMARK SUMMARY — raw-pixel MNIST checkpoint")
+print(" (Stages 2-4 use the NATIVE per-slot readout)")
 print("=" * 60)
-print(f"  Stage 1 clean accuracy        : {results['accuracy']*100:7.3f}%")
+print(f"  Stage 1 clean RAW readout     : {results['accuracy_raw']*100:7.3f}%")
+print(f"  Stage 1 clean NATIVE readout  : {results['accuracy']*100:7.3f}%  "
+      f"({(results['accuracy']-results['accuracy_raw'])*100:+.2f} pp)")
 print(f"  Stage 2 geometric (rot+trans) : {results['geometric_accuracy']*100:7.3f}%")
 print(f"  Stage 3 gaussian noise        : {results['noise_accuracy']*100:7.3f}%")
 print(f"  Stage 3 pixel masking         : {results['mask_accuracy']*100:7.3f}%")

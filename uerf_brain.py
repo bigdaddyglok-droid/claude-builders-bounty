@@ -2582,6 +2582,31 @@ class UERFExperience:
             return (norms - mu) / sd.clamp(min=1e-6)
         return norms
 
+    def predict_self_normalized(self):
+        """Physics-native readout: divide each teach slot's response magnitude
+        by its own intrinsic sensory-bond gain.
+
+        A slot whose sensor->teach bond block has a large norm responds large to
+        EVERY input — that constant per-slot gain biases the raw-magnitude argmax
+        so one chronically-loud slot becomes a sink (and quiet slots never win).
+        Normalizing each slot's response by the Frobenius norm of its own
+        sensor->teach bond block removes that fixed gain, leaving only the
+        input-specific selectivity.
+
+        Uses ONLY the brain's own weights (the C tensor) — no labels, no
+        calibration set, no input statistics, no fitted head. Distinct from the
+        z-score de-bias in predict(), which needs an unlabeled response corpus."""
+        if self.t_start is None:
+            return None
+        teach_s = self.s[self.t_start:self.t_end]
+        raw = teach_s.norm(dim=-1)                     # (n_classes,)
+        if self.input_dim:
+            gain_block = self.C[self.t_start:self.t_end, :self.input_dim]
+            gain = gain_block.norm(dim=(1, 2, 3)).clamp(min=1e-6)
+        else:
+            gain = torch.ones_like(raw)
+        return raw / gain
+
     def predict_aware(self):
         """Self-aware readout: magnitude × holographic quality gate.
 
