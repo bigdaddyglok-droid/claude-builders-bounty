@@ -2,7 +2,17 @@
 import json, os
 
 BENCH = r'''
-import os, sys, json, math, time
+import subprocess, sys
+gpu = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                     capture_output=True, text=True).stdout.strip()
+print(f"GPU: {gpu}", flush=True)
+if "P100" in gpu:
+    print("P100 detected — pinning torch 2.7.1 for Pascal (sm_60) support", flush=True)
+    subprocess.run(["pip", "install", "-q",
+                    "torch==2.7.1", "torchvision==0.22.1"], check=True)
+    print("torch 2.7.1 installed", flush=True)
+
+import os, json, math, time
 import numpy as np
 import torch
 
