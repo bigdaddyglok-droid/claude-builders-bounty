@@ -246,12 +246,16 @@ def state_modifier(state_id, theta, S, f, N, E, a0, ctx):
         return (torch.exp(torch.tensor(0.02 * sent, device=theta.device)) * one).clamp(0.95, 1.1)
 
     if state_id == S_HOLOADS:
-        # AdS boundary compression — same capacity-capped inverted-U as
-        # Holographic: peak reward at full occupancy, penalty for over-packing.
+        # AdS/CFT boundary COMPRESSION — distinct from Holographic. Where
+        # Holographic uses a symmetric inverted-U that penalises over-packing,
+        # HoloAdS rewards monotone bulk→boundary compression: a node whose state
+        # compresses cleanly onto the boundary is rewarded with saturating gain
+        # (tanh), approaching but never exceeding the holographic bound. No
+        # penalty below the bound — compression is always favourable — which is
+        # what separates the AdS-boundary regime from the capacity-capped one.
         holo_fidelity = ctx.get('holo_fidelity', None)
         if isinstance(holo_fidelity, torch.Tensor):
-            over = (holo_fidelity - 1.0).abs()
-            return (1.1 - 0.15 * over).clamp(0.95, 1.1)
+            return (0.95 + 0.15 * torch.tanh(holo_fidelity)).clamp(0.95, 1.1)
         return 1.02 * one
 
     if state_id == S_PHANTOM:
@@ -565,12 +569,14 @@ class UERFField:
     The brain: a field of n_max coupled oscillators, each with d-dim state.
     Implements all 6 equations from the UERF framework.
     """
-    # States that participate in routing competition
+    # States that participate in routing competition (all 18, including
+    # S_CONSCIOUSNESS — the observer-coupled attention gate).
     CANDIDATE_STATES = [
         S_CLASSICAL, S_TOROIDAL, S_CUBIT, S_QUANTUM, S_QUBIT,
         S_PHANTOM, S_TEMPORAL, S_RELATIVISTIC, S_HARMONIC,
         S_VACUUM, S_FRACTAL, S_RETROCAUSAL, S_ELEMENTAL,
         S_HOLOGRAPHIC, S_HOLOADS, S_THERMAL, S_MULTIVERSAL,
+        S_CONSCIOUSNESS,
     ]
 
     def __init__(self, n_max=200, n_initial=100, d=32, input_dim=None,
@@ -1047,10 +1053,34 @@ class UERFDynamics:
                 dev = base_dev
 
             elif sid == S_HOLOGRAPHIC and self._holo_projector is not None:
-                # Holographic: boundary projection fidelity
+                # Holographic: boundary projection fidelity (raw projected energy)
                 s_proj = s @ self._holo_projector
                 signal = (s * s_proj).sum(-1)
                 dev = ((s - s_proj) ** 2).sum(-1)
+
+            elif sid == S_HOLOADS and self._holo_projector is not None:
+                # HoloAdS: boundary COMPRESSION ratio — the FRACTION of the
+                # node's energy that lies on the boundary, ‖P·s‖²/‖s‖². Distinct
+                # from Holographic's unnormalized projection: it favours nodes
+                # that compress cleanly (high boundary fraction) regardless of
+                # absolute magnitude.
+                s_proj = s @ self._holo_projector
+                proj_energy = (s * s_proj).sum(-1)
+                tot_energy = (s * s).sum(-1).clamp(min=1e-6)
+                signal = base_align * (proj_energy / tot_energy).clamp(0.0, 1.0)
+                dev = base_dev
+
+            elif sid == S_CONSCIOUSNESS:
+                # Consciousness: observer-coupled attention/salience gate. A node
+                # is "attended" when its energy sits in the measurement-sensitive
+                # mid-range (maximal superposition), peaking at I_ratio=0.5 via
+                # psi = 4·I·(1−I) — the same observer-collapse term the modifier
+                # uses, so routing and α agree.
+                E_local = self.energy()
+                I_ratio = (E_local / E_local.max().clamp(min=1e-6))
+                psi = 4.0 * I_ratio * (1.0 - I_ratio)
+                signal = base_align * (1.0 + 0.5 * psi)
+                dev = base_dev
 
             elif sid == S_TOROIDAL:
                 # Toroidal: flow alignment (collective direction)
@@ -1666,8 +1696,10 @@ class UERFLearning:
             # interior mean. da_per = 1 + (DA-1)·tanh(mag/mean_act):
             #   wrong (DA>1): ACTIVE units potentiate harder; quiet units ~1.0
             #   right (DA<1): ACTIVE units consolidate (less plastic); quiet ~1.0
-            # At the population mean this collapses to the old global DA, so it
-            # only ADDS per-unit specificity — it does not rescale the baseline.
+            # tanh(mag/mean_act) scales the DA deviation by per-unit activity:
+            # a unit at the population mean gets tanh(1)≈0.76 of the deviation,
+            # the most active units approach the full DA level, quiet units ~1.0.
+            # This concentrates credit on the units that drove the prediction.
             _da_level = self._neuro.get('da', 1.0)
             if interior.any():
                 _mean_act = mag[interior].mean().clamp(min=1e-6)
@@ -2647,7 +2679,8 @@ class UERFExperience:
         return {'n_calib': len(rows)}
 
     def predict_scores(self):
-        """Same as predict but returns raw scores."""
+        """Alias for predict(): returns the class-score vector (same calibration
+        as predict — z-score de-biased when _readout_mu/_readout_sigma are set)."""
         return self.predict()
 
     def fit_teach_templates(self, xs, ys, n_relax=None, domain_lo=None, domain_hi=None):
@@ -2735,11 +2768,12 @@ class UERFExperience:
     # The default predict() collapses each teach slot's d-dim state to a single
     # magnitude and argmaxes — discarding 31/32 of the signal the field actually
     # holds. This reads the WHOLE settled teach-field (n_classes × d) and
-    # recognizes an input by matching it against prototypes the brain builds
-    # from ITS OWN remembered examples (the per-class replay buffer it filled
-    # during training). No external classifier, no held-out labels — the brain
-    # recognizing new inputs by how closely their field-response resembles the
-    # field-response of things it already remembers.
+    # matches an input against per-class prototypes. NOTE: the prototypes are
+    # built by build_self_catalog() from explicit labeled calibration examples
+    # (extra_xs/extra_ys) — this is an external nearest-prototype head, NOT a
+    # self-supervised / replay-buffer mechanism. (There is no replay buffer; it
+    # was removed.) Its value is using the full field response rather than the
+    # scalar magnitude, not label-free recognition.
     # ─────────────────────────────────────────────────────────────────────────
     def _capture_teach_field(self, x, n_relax=None):
         """Run a non-destructive eval pass and return the settled full teach
