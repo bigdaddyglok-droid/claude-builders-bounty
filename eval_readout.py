@@ -99,7 +99,6 @@ def main():
 
     dev = 'cuda' if torch.cuda.is_available() else 'cpu'
     field = U.UERFField.load_checkpoint(args.ckpt, device=dev)
-    field._replay_disabled = True
     loader, lo, ncls = DOMAINS[args.domain]
     hi = lo + ncls
     print(f"[{args.name}/{args.domain}] slots [{lo}:{hi}] of n_classes={field.n_classes} "

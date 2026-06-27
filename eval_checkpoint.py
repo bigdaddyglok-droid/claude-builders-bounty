@@ -91,7 +91,6 @@ def main():
     dev = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"device={dev}  loading {args.ckpt} ...", flush=True)
     field = U.UERFField.load_checkpoint(args.ckpt, device=dev)
-    field._replay_disabled = True
     print(f"loaded: n_max={field.n_max} d={field.d} input_dim={field.input_dim} "
           f"n_classes={field.n_classes} exp_count={int(field.experience_count)}", flush=True)
 

@@ -680,14 +680,6 @@ class UERFField:
         # per-class teach-bond accumulators) — no stored training examples,
         # no rehearsal.
 
-        # ── ABLATION TOGGLES ──────────────────────────────────────────────
-        # Each of the 6 audit fixes is independently switchable so we can run
-        # the full 64-combination ablation from a single brain file (no copy-
-        # paste drift between variants). Default all-False = original behavior.
-        self.fixes = {
-            'fix1': False, 'fix2': False, 'fix3': False,
-            'fix4': False, 'fix5': False, 'fix6': False,
-        }
         self._last_birth_step = -1000
 
         # ── Per-class teaching bond TRUE-MEAN accumulators
@@ -1414,9 +1406,8 @@ class UERFDynamics:
             P_in = torch.where(teach_mask, P_in_teach, P_in)
 
             # Teaching slots need a base alpha (moderate retention).
-            _teach_alpha = 0.5 if self.fixes.get('fix2') else 0.3
             alpha = torch.where(teach_mask,
-                                torch.full_like(alpha, _teach_alpha),
+                                torch.full_like(alpha, 0.5),
                                 alpha)
 
             # Cross-state energy flow (Unified Master Equation)
@@ -1691,22 +1682,18 @@ class UERFLearning:
                 _ach = self._neuro.get('ach', 1.0)
                 da_chunk = da_per[r0:r1].view(-1, 1, 1, 1)   # (chunk,1,1,1) per receiver
                 self.C[r0:r1] += lr * _ach * da_chunk * alpha_scale * delta_C * recv_mask.float().unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-                # Decay bonds. locked rows are always frozen (no decay).
-                # that share a chunk with interior receivers also get decayed,
-                # bleeding teach-slot bonds between Pathway-2 rewrites.
+                # Decay bonds. ONLY interior receivers decay; every non-receiver
+                # row — teach-slot readout rows and locked consolidated nodes —
+                # is frozen. This is what makes the disjoint per-class accumulator
+                # guarantee real: an inactive class's readout bonds never erode
+                # while other classes train.
                 locked_chunk = self._class_locked[r0:r1]
                 _ach_d = self._neuro.get('ach', 1.0)  # higher ACh → less decay
-                if self.fixes.get('fix6'):
-                    is_receiver = recv_mask & ~locked_chunk
-                    decay_per_row = torch.where(
-                        is_receiver,
-                        torch.tensor(1.0 - decay / _ach_d, device=self.device),
-                        torch.tensor(1.0, device=self.device))   # non-receivers frozen
-                else:
-                    decay_per_row = torch.where(
-                        locked_chunk,
-                        torch.tensor(1.0, device=self.device),     # locked: no decay
-                        torch.tensor(1.0 - decay / _ach_d, device=self.device))
+                is_receiver = recv_mask & ~locked_chunk
+                decay_per_row = torch.where(
+                    is_receiver,
+                    torch.tensor(1.0 - decay / _ach_d, device=self.device),
+                    torch.tensor(1.0, device=self.device))   # non-receivers frozen
                 self.C[r0:r1] *= decay_per_row.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
                 del delta_C
 
@@ -1770,19 +1757,11 @@ class UERFLearning:
                                           / count)
                             self.C[t0 + active_class, sensor_idx] = mean_bonds
 
-                    # Auxiliary interior→teaching bonds (smaller, additive).
-                    # via += over thousands of steps, eventually dominating the
-                    # clean normalized sensor→teach mean-accumulator bonds and
-                    # polluting the discriminative readout. When fix3 is on we
-                    # rely solely on the sensor-based mean bonds above.
-                    if not self.fixes.get('fix3'):
-                        target_dir = teach_c[active_class]
-                        for j_idx in bond_idx[:20]:
-                            s_j = s[j_idx]
-                            if s_j.norm() > 1e-6:
-                                self.C[t0 + active_class, j_idx] += (
-                                    0.02 * torch.outer(target_dir, s_j))
-                    # Inactive classes: completely untouched.
+                    # The readout is the clean sensor→teach mean accumulator
+                    # above. (Additive interior→teach bonds were removed: over
+                    # thousands of steps they grew via += and dominated the
+                    # normalized sensor bonds, polluting the discriminative
+                    # readout.) Inactive classes are untouched here.
 
             # PATHWAY 3: Sensor → Interior bonds (input pathway)
             # Sensors are pinned, so their bonds TO interior should strengthen
@@ -2518,8 +2497,9 @@ class UERFExperience:
                 # bonds learned earlier in training.
                 if self.input_dim is not None:
                     input_sig = (x.unsqueeze(-1) * self.c[:self.input_dim]).sum(0)
-                    _lrc = 0.001 if self.fixes.get('fix4') else 0.005
-                    self._competitive_c_learning(input_sig=input_sig, lr_c=_lrc)
+                    # Slow interior identity drift so c-vectors stay aligned with
+                    # the bonds learned earlier in training.
+                    self._competitive_c_learning(input_sig=input_sig, lr_c=0.001)
 
                 # Phantom birth and emergent growth triggers, calibrated to
                 # match the contradiction signal's real range. After the
@@ -2826,11 +2806,11 @@ class UERFExperience:
                      predict_fn=None):
         """
         Non-destructive evaluation. Save ALL state, run inference, restore.
-        fix5: default n_relax 10 instead of 6 (more ticks for bonds to drive
-        teach slots from zero). Explicit n_relax arg always overrides.
+        Default n_relax is 10 (enough ticks for bonds to drive teach slots up
+        from zero). Explicit n_relax arg always overrides.
         """
         if n_relax is None:
-            n_relax = 10 if self.fixes.get('fix5') else 6
+            n_relax = 10
         # Save complete state
         save = {
             's': self.s.clone(),
@@ -2862,17 +2842,15 @@ class UERFExperience:
         # Device safety: ensure input is on same device as model
         x = x.to(self.device)
 
-        # State-dependent decay. fix1: additionally apply the input-resonance
-        # gate that experience() uses (so eval recreates the sparse pattern-
-        # specific activation). NOTE: proven inert alone in A/B (the gate is
-        # applied once pre-loop and the relaxation loop washes it out), but
-        # kept toggleable for the full ablation — it may matter in combination.
+        # State-dependent decay. Apply the same input-resonance gate that
+        # experience() uses, so eval recreates the sparse, pattern-specific
+        # activation the bonds were trained against.
         x = x / x.norm().clamp(min=1e-6)
         interior = self.alive_mask & ~self._is_sensory & ~self._is_teaching
         if interior.any():
             cr = self.crystallized()
 
-            if self.fixes.get('fix1') and self.input_dim is not None:
+            if self.input_dim is not None:
                 input_sig = (x.unsqueeze(-1) * self.c[:self.input_dim]).sum(0)
                 input_sig = input_sig / input_sig.norm().clamp(min=1e-6)
                 resonance = (self.c * input_sig.unsqueeze(0)).sum(-1)
@@ -2945,7 +2923,7 @@ class UERFExperience:
             meta   : dict with contradiction, ach, holo_mean, field_confidence
         """
         if n_relax is None:
-            n_relax = 10 if self.fixes.get('fix5') else 6
+            n_relax = 10
 
         pred_raw, scores = self.eval_predict(
             x, n_relax=n_relax, return_scores=True,
@@ -3071,8 +3049,6 @@ class UERFCheckpoint:
         # Save class lock state
         ckpt['_class_locked'] = self._class_locked.detach().cpu().clone()
         ckpt['_locked_class'] = self._locked_class.detach().cpu().clone()
-        # Save ablation fix toggles so a checkpoint remembers its config
-        ckpt['fixes'] = dict(self.fixes)
         torch.save(ckpt, path)
         return path
 
@@ -3107,9 +3083,6 @@ class UERFCheckpoint:
             f._class_locked = ckpt['_class_locked'].to(dev)
         if '_locked_class' in ckpt:
             f._locked_class = ckpt['_locked_class'].to(dev)
-        # Restore ablation fix toggles (default all-False for old checkpoints)
-        if 'fixes' in ckpt and isinstance(ckpt['fixes'], dict):
-            f.fixes = dict(ckpt['fixes'])
         return f
 
 

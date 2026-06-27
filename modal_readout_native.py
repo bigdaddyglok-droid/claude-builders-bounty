@@ -33,7 +33,6 @@ def run_readout(hf_token: str, n_eval: int = 2000) -> dict:
 
     dev = "cuda"
     field = U.UERFField.load_checkpoint(os.path.join(ws, "phase3_main.pt"), device=dev)
-    field._replay_disabled = True
 
     out = {}
     locked = (field._class_locked & field.alive_mask)

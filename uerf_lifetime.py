@@ -122,11 +122,9 @@ CONFIG = {
     'n_lock_per_cls' : 4,             # 4 osc × 310 classes = 1240 lock budget MAX
                                       # leaves ~560 plastic for ongoing learning
 
-    # ── REPLAY BUFFER POLICY ──────────────────────────────────────────────
-    # Flaw A (per audit): if patent claim is that physics SOLVE catastrophic
-    # forgetting, then replay buffer is competing evidence. Disable it for
-    # the gauntlet to prove the architecture alone preserves memory.
-    'disable_replay' : True,          # set True for clean physics-only test
+    # Replay buffer / rehearsal does not exist — the architecture preserves
+    # memory with physics alone (crystallization, locking, disjoint per-class
+    # teach-bond accumulators). There is no replay to toggle.
 
     # ── PER-PHASE STEPS ───────────────────────────────────────────────────
     'phase1_mnist_steps'    : 10000,
@@ -412,14 +410,6 @@ def set_active_teach_slots(field, n_active_classes):
           f"total alive nodes now {n_alive_total}")
 
 
-def _configure_field(field):
-    """Apply all ablation fixes and rebuild C_states to match the doc's coupling spec.
-    Called after every brain build or load so the config is always current.
-    """
-    field.fixes = {k: True for k in field.fixes}
-    print(f"[config] field.fixes = {field.fixes}")
-
-
 def build_fresh_brain():
     """Build the lifetime brain pre-allocated for all phases."""
     sys.path.insert(0, BASE_DIR)
@@ -432,13 +422,9 @@ def build_fresh_brain():
         n_classes   = CONFIG['n_classes'],
         d           = CONFIG['d'],
     )
-    # Apply replay policy from CONFIG
-    field._replay_disabled = CONFIG.get('disable_replay', False)
-    _configure_field(field)
     print(f"[brain] built fresh: n_max={CONFIG['n_max']}, d={CONFIG['d']}, "
           f"n_classes={CONFIG['n_classes']}, "
-          f"teach slots {field.t_start}-{field.t_end}, "
-          f"replay_disabled={field._replay_disabled}")
+          f"teach slots {field.t_start}-{field.t_end}")
     return field
 
 def load_or_build_brain():
@@ -454,15 +440,10 @@ def load_or_build_brain():
                 f"Checkpoint dims (n_max={field.n_max}, d={field.d}) don't match "
                 f"CONFIG (n_max={CONFIG['n_max']}, d={CONFIG['d']}). "
                 "Delete the checkpoint or fix CONFIG to match.")
-        # Re-apply replay policy and force all ablation fixes on (in case CONFIG
-        # or brain code changed since the checkpoint was written).
-        field._replay_disabled = CONFIG.get('disable_replay', False)
-        _configure_field(field)
         print(f"[brain] loaded: experience={field.experience_count}, "
               f"alive={int(field.alive_mask.sum())}, "
               f"locked={int(field._class_locked.sum())}, "
-              f"bonds={int(field.C_mask.sum())}, "
-              f"replay_disabled={field._replay_disabled}")
+              f"bonds={int(field.C_mask.sum())}")
         return field
     else:
         return build_fresh_brain()

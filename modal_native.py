@@ -53,7 +53,6 @@ def run_native(hf_token: str, n_eval: int = 2000, n_wide: int = 1000,
 
     dev = "cuda"
     field = U.UERFField.load_checkpoint(os.path.join(ws, "phase3_main.pt"), device=dev)
-    field._replay_disabled = True
     lo, hi = 0, 10   # MNIST slots
 
     n_mem = sum(len(b) for k, b in field._replay_per_class.items() if 0 <= k < 10)

@@ -122,7 +122,6 @@ def main():
     dev = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"[{args.name}] device={dev}  loading {args.ckpt} ...", flush=True)
     field = U.UERFField.load_checkpoint(args.ckpt, device=dev)
-    field._replay_disabled = True
 
     n_locked_total = int((field._class_locked & field.alive_mask).sum())
     n_interior_total = int((field.alive_mask & ~field._is_sensory & ~field._is_teaching).sum())

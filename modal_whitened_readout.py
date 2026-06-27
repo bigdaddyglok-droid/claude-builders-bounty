@@ -97,7 +97,6 @@ def run(hf_token: str, source: dict, n_eval: int = 2000,
     import uerf_brain as U, uerf_lifetime as L
     dev = "cuda"
     field = U.UERFField.load_checkpoint(ckpt_path, device=dev)
-    field._replay_disabled = True
     LO, HI = domain
     HI = min(HI, field.n_classes)
     out = {"label": label, "domain": [LO, HI],
