@@ -509,21 +509,37 @@ def valence(s, R, I, alpha, lam=0.25):
 # SENSORY PROJECTION — fixed random projection from raw input to d-dim
 # ═══════════════════════════════════════════════════════════════════════════════
 class SensoryProjection:
-    """Fixed random projection from raw input space to n_sensory dimensions."""
-    def __init__(self, raw_dim, n_sensory, seed=42):
+    """Fixed random projection from raw input space to n_sensory dimensions.
+
+    Optional mean-subtraction (mean_raw): the raw input has a large DC component
+    (e.g. the "average digit" ink mass) that is shared across every class. Left
+    in, it dominates the projected vector, so every class's stored readout
+    template is 80-97% common-mode and the densest classes win the argmax for
+    nearly all inputs. Subtracting a FROZEN dataset mean image before projection
+    removes that common-mode at the source — standard mean-subtraction, no
+    labels — so the readout is discriminative by construction with no eval-time
+    correction. The reference is frozen (not a drifting running mean) so a
+    class's bonds are centred against the same reference at train and eval time
+    across all later phases (preserves the zero-forgetting guarantee)."""
+    def __init__(self, raw_dim, n_sensory, seed=42, mean_raw=None):
         rng = torch.Generator().manual_seed(seed)
         self.W = torch.randn(raw_dim, n_sensory, generator=rng) / math.sqrt(raw_dim)
         self.n_sensory = n_sensory
+        self.mean_raw = mean_raw if mean_raw is None else mean_raw.reshape(-1)
 
     def __call__(self, x):
         """Project raw input x (raw_dim,) → (n_sensory,) normalized."""
         x = x.to(self.W.device)
+        if self.mean_raw is not None:
+            x = x - self.mean_raw
         out = x @ self.W
         return out / out.norm().clamp(min=1e-6)
 
     def to(self, device):
         """Move projection matrix to specified device."""
         self.W = self.W.to(device)
+        if self.mean_raw is not None:
+            self.mean_raw = self.mean_raw.to(device)
         return self
 
 
@@ -1697,13 +1713,15 @@ class UERFLearning:
                 self.C[r0:r1] *= decay_per_row.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
                 del delta_C
 
-            # PATHWAY 2: Teaching slots RECEIVE from interior (readout pathway)
-            # CONTRASTIVE LEARNING:
-            # - The ACTIVE class slot (pinned during training) gets bonds STRENGTHENED
-            #   so that the current interior pattern drives it.
-            # - INACTIVE class slots get bonds WEAKENED (anti-Hebbian)
-            #   so they don't activate for this pattern.
-            # This creates discriminative readout.
+            # PATHWAY 2: Teaching slots RECEIVE from sensors (readout pathway).
+            # Only the ACTIVE class slot is updated: its bonds accumulate the
+            # running mean of the (zero-mean) sensor pattern for that class.
+            # Inactive classes are left untouched — disjoint per-class storage is
+            # what gives the zero-forgetting guarantee. Discrimination does NOT
+            # come from anti-Hebbian weakening here (that would couple classes
+            # and break disjoint storage); it comes from the zero-mean sensory
+            # encoding (see SensoryProjection.mean_raw), which removes the
+            # common-mode so each class's stored mean is its distinctive pattern.
             if self.t_start is not None:
                 t0, t1 = self.t_start, self.t_end
                 n_cls = t1 - t0
@@ -1774,7 +1792,10 @@ class UERFLearning:
             # energy landscape and confines dynamics against catastrophic
             # forgetting). The physics must scale with the field. Bitwise
             # identical to the per-node loop, applied to the full interior set.
-            _autapse_valid = interior & (mag > 1e-6)
+            # Locked consolidated-memory nodes are excluded: their bonds —
+            # including the self-bond diagonal — must stay frozen, so the
+            # autapse update never touches them.
+            _autapse_valid = interior & (mag > 1e-6) & ~self._class_locked
             _av_idx = _autapse_valid.nonzero(as_tuple=True)[0]
             if len(_av_idx) > 0:
                 _s_v = s[_av_idx]                                   # (k, d)
@@ -3028,6 +3049,11 @@ class UERFCheckpoint:
         'neuro_enabled', '_neuro', '_mean_valence_prev',
         # native full-field readout catalog
         '_field_catalog',
+        # readout calibration + template heads (used at inference; must persist
+        # or a resumed brain silently reverts to a different readout)
+        '_readout_mu', '_readout_sigma', '_teach_templates',
+        # neurogenesis refractory
+        '_last_grow_step',
     )
 
     def save_checkpoint(self, path):
