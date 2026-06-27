@@ -148,6 +148,12 @@ ALPHA_RANGES = {
     S_CONSCIOUSNESS:(0.90, 0.96),
 }
 
+# Graded-consolidation tunables (vacuum forget/recall memory model)
+PRESERVE_FLOOR   = 0.25     # below this a consolidated memory is released to vacuum
+PRESERVE_RENEW   = 0.10     # how fast use pulls preservation back toward 1.0
+PRESERVE_DECAY   = 0.002    # per-experience disuse fade of preservation
+RECALL_RESONANCE = 0.5      # cue/identity alignment needed to recall a vacuum node
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # PER-STATE MODIFIERS — each returns a (n,) tensor that scales alpha_core
 # into the state's specific physical regime.
@@ -719,6 +725,13 @@ class UERFField:
         self._class_locked = torch.zeros(n_max, dtype=torch.bool, device=dev)
         # Map: which class each locked oscillator belongs to (−1 if not locked)
         self._locked_class = torch.full((n_max,), -1, dtype=torch.long, device=dev)
+        # Graded preservation strength of a consolidated node (1 = fresh/sticky).
+        # Renews toward 1 when the node is used (its cue recurs) and fades slowly
+        # with disuse. A locked node is hard-frozen only while preservation is
+        # high; once it fades below PRESERVE_FLOOR the memory is released to the
+        # VACUUM reservoir (forgotten-but-recoverable) instead of staying frozen
+        # forever. This makes consolidation reversible, like real memory.
+        self._preservation = torch.ones(n_max, device=dev)
 
         # ── Novelty tracking
         self._input_running_mean = None
@@ -1480,6 +1493,31 @@ class UERFDynamics:
                                  torch.maximum(E_next, self.vacuum_energy * 0.3),
                                  E_next)
 
+            # ── Cue-triggered recall ──────────────────────────────────────────
+            # A dormant (vacuum) memory whose stored identity resonates with the
+            # CURRENT input is re-energized well above the floor and released from
+            # the reservoir, so routing can promote it back to an active state.
+            # This is the "slowly forgotten but suddenly recalled" path: the trace
+            # was preserved (bonds/identity frozen in vacuum), and the matching cue
+            # brings it back to life.
+            if (pin_sensory is not None and self.input_dim is not None
+                    and bool(vacuum_mask.any())):
+                input_sig = pin_sensory.sum(0)                   # (d,)
+                in_norm = input_sig.norm()
+                if in_norm > 1e-5:
+                    input_sig = input_sig / in_norm
+                    resonance = (self.c * input_sig.unsqueeze(0)).sum(-1)  # (n,)
+                    recall_mask = vacuum_mask & (resonance > RECALL_RESONANCE)
+                    if bool(recall_mask.any()):
+                        boost = (resonance.clamp(0.0, 1.0) ** 2) * 2.0
+                        E_next = torch.where(recall_mask,
+                                             torch.maximum(E_next, boost), E_next)
+                        # release from the reservoir → routing re-evaluates next tick
+                        self.state_id = torch.where(
+                            recall_mask,
+                            torch.full_like(self.state_id, S_CLASSICAL),
+                            self.state_id)
+
             # Time dilation: high-γ oscillators change slower
             # CRITICAL: Teaching slots BYPASS time dilation.
             # They are readout nodes that must respond immediately to bond drive.
@@ -1522,9 +1560,13 @@ class UERFDynamics:
             # contradict their α<1. _class_locked is always interior (see
             # consolidate_class), so this never clobbers the sensory/teaching
             # pins applied above.
-            if self._class_locked.any():
-                new_s = torch.where(self._class_locked.unsqueeze(-1),
-                                    self.s, new_s)
+            # GRADED: a locked node is frozen only while its preservation is
+            # high. Once a consolidated memory fades (preservation <= floor) it
+            # is no longer pinned and follows normal dynamics — it can fall to
+            # vacuum and be recalled — so consolidation is reversible.
+            frozen = self._class_locked & (self._preservation > PRESERVE_FLOOR)
+            if frozen.any():
+                new_s = torch.where(frozen.unsqueeze(-1), self.s, new_s)
 
             self.s = new_s * alive.float().unsqueeze(-1)
 
@@ -1735,9 +1777,13 @@ class UERFLearning:
                 # is frozen. This is what makes the disjoint per-class accumulator
                 # guarantee real: an inactive class's readout bonds never erode
                 # while other classes train.
+                # VACUUM nodes are also frozen: a memory demoted to the dormant
+                # reservoir keeps its faded-but-nonzero trace (it does NOT decay
+                # to zero), so a matching cue can later recall it.
                 locked_chunk = self._class_locked[r0:r1]
+                vacuum_chunk  = (self.state_id[r0:r1] == S_VACUUM)
                 _ach_d = self._neuro.get('ach', 1.0)  # higher ACh → less decay
-                is_receiver = recv_mask & ~locked_chunk
+                is_receiver = recv_mask & ~locked_chunk & ~vacuum_chunk
                 decay_per_row = torch.where(
                     is_receiver,
                     torch.tensor(1.0 - decay / _ach_d, device=self.device),
@@ -1826,8 +1872,11 @@ class UERFLearning:
             # identical to the per-node loop, applied to the full interior set.
             # Locked consolidated-memory nodes are excluded: their bonds —
             # including the self-bond diagonal — must stay frozen, so the
-            # autapse update never touches them.
-            _autapse_valid = interior & (mag > 1e-6) & ~self._class_locked
+            # autapse update never touches them. VACUUM nodes are also excluded
+            # so the stored self-attractor of a dormant memory is preserved
+            # intact for later cue-triggered recall.
+            _autapse_valid = (interior & (mag > 1e-6) & ~self._class_locked
+                              & (self.state_id != S_VACUUM))
             _av_idx = _autapse_valid.nonzero(as_tuple=True)[0]
             if len(_av_idx) > 0:
                 _s_v = s[_av_idx]                                   # (k, d)
@@ -2079,19 +2128,38 @@ class UERFLearning:
             cr = self.crystallized()
             self.age[interior] += 1
 
-            # Cull: old + low energy + not crystallized + NOT class-locked
+            # Old + low energy + not crystallized + NOT class-locked: candidate
+            # for forgetting. But forgetting is GRACEFUL — a node that still
+            # carries a learned identity (a non-trivial self-attractor) is
+            # demoted to the VACUUM reservoir, not erased: it fades to a dormant,
+            # low-energy trace whose bonds are frozen (see _learn_bonds) and can
+            # be recalled later when a matching cue returns. Only nodes with no
+            # learned content (empty self-bond) are actually culled/freed.
             E = self.energy()
             old = self.age > 200
             low_E = E < 0.001
             cullable = interior & old & low_E & ~cr & ~self._class_locked
+            cull_idx = cullable.nonzero(as_tuple=True)[0]
 
-            if cullable.any():
-                self.alive_mask[cullable] = False
-                self.C[cullable] = 0.0
-                self.C[:, cullable] = 0.0
-                self.C_mask[cullable] = False
-                self.C_mask[:, cullable] = False
-                self.deaths += int(cullable.sum())
+            if len(cull_idx) > 0:
+                autapse = self.C[cull_idx, cull_idx].reshape(len(cull_idx), -1)
+                has_memory = autapse.norm(dim=1) > 1e-4
+                demote_idx = cull_idx[has_memory]
+                dead_idx   = cull_idx[~has_memory]
+
+                if len(demote_idx) > 0:
+                    # Demote to the dormant vacuum reservoir (forgotten, not lost).
+                    self.state_id[demote_idx] = S_VACUUM
+                    self.age[demote_idx] = 0     # don't immediately re-cull
+                    self.deaths += 0             # demotion is not a death
+
+                if len(dead_idx) > 0:
+                    self.alive_mask[dead_idx] = False
+                    self.C[dead_idx] = 0.0
+                    self.C[:, dead_idx] = 0.0
+                    self.C_mask[dead_idx] = False
+                    self.C_mask[:, dead_idx] = False
+                    self.deaths += int(len(dead_idx))
 
     def consolidate_class(self, class_id, n_lock=8):
         """
@@ -2139,6 +2207,7 @@ class UERFLearning:
                 self.state_id[idx] = S_HOLOGRAPHIC
                 self._class_locked[idx] = True
                 self._locked_class[idx] = class_id
+                self._preservation[idx] = 1.0   # freshly consolidated → fully sticky
                 self.crystallization_events += 1
                 locked_count += 1
             return locked_count
@@ -2173,7 +2242,7 @@ class UERFLearning:
                 'age', 'proper_time', 'local_v2c2', '_valence_accumulator',
                 '_valence_count',
             ]
-            scalar_attrs_one = ['gamma']
+            scalar_attrs_one = ['gamma', '_preservation']  # both init to 1.0
             scalar_attrs_half = ['local_T']  # init 0.5
             scalar_attrs_neg1 = ['local_w']  # init -1.0
             scalar_attrs_0_1 = ['vacuum_energy']  # init 0.1
@@ -2557,6 +2626,30 @@ class UERFExperience:
                     # Slow interior identity drift so c-vectors stay aligned with
                     # the bonds learned earlier in training.
                     self._competitive_c_learning(input_sig=input_sig, lr_c=0.001)
+
+                    # ── Graded consolidation: renew on use, fade on disuse ──────
+                    # A consolidated memory whose identity matches the current
+                    # input is being USED → its preservation renews toward 1. The
+                    # rest of the locked set fades slowly (disuse). When a memory
+                    # fades past the floor it is RELEASED to the vacuum reservoir
+                    # (un-locked, dormant) — forgotten but recallable, since its
+                    # bonds were frozen in vacuum. Consolidation is reversible.
+                    if bool(self._class_locked.any()):
+                        in_n = input_sig / input_sig.norm().clamp(min=1e-6)
+                        res = (self.c * in_n.unsqueeze(0)).sum(-1)        # (n,)
+                        used  = self._class_locked & (res > RECALL_RESONANCE)
+                        faded = self._class_locked & ~used
+                        self._preservation = torch.where(
+                            used, (self._preservation + PRESERVE_RENEW).clamp(max=1.0),
+                            self._preservation)
+                        self._preservation = torch.where(
+                            faded, (self._preservation - PRESERVE_DECAY).clamp(min=0.0),
+                            self._preservation)
+                        release = self._class_locked & (self._preservation <= PRESERVE_FLOOR)
+                        if bool(release.any()):
+                            self._class_locked[release] = False
+                            self._locked_class[release] = -1
+                            self.state_id[release] = S_VACUUM
 
                 # Phantom birth and emergent growth triggers, calibrated to
                 # match the contradiction signal's real range. After the
@@ -3108,6 +3201,8 @@ class UERFCheckpoint:
         '_readout_mu', '_readout_sigma', '_teach_templates',
         # neurogenesis refractory
         '_last_grow_step',
+        # graded consolidation strength (vacuum forget/recall memory)
+        '_preservation',
     )
 
     def save_checkpoint(self, path):
