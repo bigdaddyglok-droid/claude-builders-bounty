@@ -26,9 +26,9 @@ app = modal.App("uerf-train", image=image)
 HF_DATASET = "BlackLoks/uerf-checkpoints"
 
 
-@app.function(gpu="A100", timeout=14400, memory=32768, cpu=8.0)
+@app.function(gpu="A100", timeout=28800, memory=32768, cpu=8.0)
 def run_train(hf_token: str, phase_a_steps: int = 10000, phase_b_steps: int = 10000,
-              eval_n: int = 1000) -> dict:
+              eval_n: int = 600) -> dict:
     import os, sys, time, shutil
     import torch
     import numpy as np
@@ -97,11 +97,11 @@ def run_train(hf_token: str, phase_a_steps: int = 10000, phase_b_steps: int = 10
             if y not in allowed:
                 continue
             x = proj(test_imgs[idx])
-            pred = field.eval_predict(x, domain_lo=lo, domain_hi=hi)
+            pred = field.eval_predict(x, n_relax=8, domain_lo=lo, domain_hi=hi)
             correct += int(pred == y); total += 1
         return 100.0 * correct / max(total, 1)
 
-    def recall_events(classes, n=300):
+    def recall_events(classes, n=200):
         """Avg # of dormant (vacuum) nodes whose identity resonates with a cue of
         these classes strongly enough to be recalled. Pure measurement — mirrors
         the recall rule in _dynamics_step without mutating the brain."""
@@ -135,6 +135,20 @@ def run_train(hf_token: str, phase_a_steps: int = 10000, phase_b_steps: int = 10
 
     # ── Phase B ───────────────────────────────────────────────────────────────
     train_phase([5, 6, 7, 8, 9], phase_b_steps, "Phase B")
+
+    # Persist the trained brain to HF IMMEDIATELY (before the eval battery) so a
+    # later timeout can never lose it again.
+    try:
+        from huggingface_hub import HfApi
+        ckpt_path = os.path.join(ws, "trained_main.pt")
+        field.save_checkpoint(ckpt_path)
+        HfApi(token=hf_token).upload_file(
+            path_or_fileobj=ckpt_path, path_in_repo="vacuum_main.pt",
+            repo_id=HF_DATASET, repo_type="dataset")
+        print("[ckpt] uploaded vacuum_main.pt to HF", flush=True)
+    except Exception as e:
+        print(f"[ckpt] save failed: {e}", flush=True)
+
     locked_after_b = int(field._class_locked.sum())
     released = locked_after_a - locked_after_b   # A-memories that faded to vacuum
 
