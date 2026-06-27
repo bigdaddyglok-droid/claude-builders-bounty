@@ -103,7 +103,11 @@ def run_neuro(hf_token: str, neuro_enabled: bool, n_train_steps: int = 0) -> dic
             x = x / x.norm().clamp(min=1e-6)
             tv = torch.zeros(field.n_classes, device=dev)
             tv[lbl] = 1.0
-            field.experience(x, teaching_vector=tv, n_relax=6)
+            # Domain-restrict the closed-loop DA check to MNIST slots [0:10] so
+            # foreign CIFAR/TI slots can't flip the prediction to 'wrong' and
+            # pollute the wrong/right DA buckets (must match the eval below).
+            field.experience(x, teaching_vector=tv, n_relax=6,
+                             domain_lo=0, domain_hi=10)
             # Closed-loop check: did the brain predict right BEFORE teaching,
             # and what did DA do in response? (set inside experience())
             pc = getattr(field, "_prediction_correct", 0.5)

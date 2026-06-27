@@ -585,7 +585,12 @@ def eval_phase(field, encoder, dataset, class_offset, n_classes_in_phase,
             img, lbl = dataset[idx]
             feat = encoder.encode(img.unsqueeze(0))[0]   # (512,)
             x = proj(feat)
-            pred_global = field.eval_predict(x)
+            # Domain-restrict the argmax to THIS phase's slot range, so a
+            # later-trained domain cannot win and the number measures retention
+            # of THIS domain, not inter-domain competition.
+            pred_global = field.eval_predict(
+                x, domain_lo=class_offset,
+                domain_hi=class_offset + n_classes_in_phase)
             # Brain returns global class index; convert back to dataset class
             pred_in_phase = pred_global - class_offset
             target = lbl
@@ -792,7 +797,10 @@ def run_phase_4():
     print(f"  MNIST  (10 cls,  trained Phase 1): {acc_mnist:.2f}%")
     print(f"  CIFAR  (100 cls, trained Phase 2): {acc_cifar:.2f}%")
     print(f"  TI     (200 cls, trained Phase 3): {acc_ti:.2f}%")
-    print(f"  Chance: MNIST=10%, CIFAR=1%, TI=0.5%")
+    # Eval is domain-restricted (argmax within each domain's slot range), so
+    # these per-domain chance baselines are the correct floor: MNIST 10-way,
+    # CIFAR 100-way, TI 200-way.
+    print(f"  Chance: MNIST=10%, CIFAR=1%, TI=0.5%  (domain-restricted argmax)")
 
     log_event('phase_4_final',
               acc_mnist_final=acc_mnist, acc_cifar_final=acc_cifar, acc_ti_final=acc_ti)

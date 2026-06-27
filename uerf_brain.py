@@ -2402,13 +2402,17 @@ class UERFExperience:
     """Mixin: experience (training), rehearsal, and prediction."""
 
     def experience(self, x, teaching_vector=None, n_relax=6, learn=True,
-                   bond_chunk=256):
+                   bond_chunk=256, domain_lo=None, domain_hi=None):
         """
         Present one input pattern to the brain.
         x: (n_sensory,) normalized input vector.
         teaching_vector: (n_classes,) one-hot target (or None for inference).
         n_relax: number of dynamics ticks per experience.
         learn: whether to update bonds.
+        domain_lo/domain_hi: restrict the closed-loop prediction-error check
+            (which drives DA) to the current domain's slot range, so on a
+            multi-domain checkpoint a foreign slot can't flip the prediction to
+            'wrong' and pollute the DA signal. Defaults to the full slot range.
         """
         with torch.no_grad():
             self.experience_count += 1
@@ -2448,10 +2452,10 @@ class UERFExperience:
             # eval exactly. neuro_enabled gates it — zero overhead when off.
             if (learn and self.neuro_enabled and teaching_vector is not None
                     and self.t_start is not None):
-                _, pre_scores = self.eval_predict(x, n_relax=n_relax,
-                                                  return_scores=True)
+                pre_class, pre_scores = self.eval_predict(
+                    x, n_relax=n_relax, return_scores=True,
+                    domain_lo=domain_lo, domain_hi=domain_hi)
                 if pre_scores is not None:
-                    pre_class  = int(pre_scores.argmax().item())
                     true_class = int(teaching_vector.argmax().item())
                     self._prediction_correct = float(pre_class == true_class)
                 else:
@@ -2858,11 +2862,18 @@ class UERFExperience:
         return -1
 
     def eval_predict(self, x, n_relax=None, bond_chunk=256, return_scores=False,
-                     predict_fn=None):
+                     predict_fn=None, domain_lo=None, domain_hi=None):
         """
         Non-destructive evaluation. Save ALL state, run inference, restore.
         Default n_relax is 10 (enough ticks for bonds to drive teach slots up
         from zero). Explicit n_relax arg always overrides.
+
+        domain_lo/domain_hi: restrict the argmax to slots [domain_lo:domain_hi].
+        Required for any multi-domain checkpoint — without it the argmax ranges
+        over EVERY class slot (e.g. all 310 lifetime slots), so a later-trained
+        domain can out-compete the correct slot and a 'retention' drop conflates
+        forgetting with inter-domain competition. The returned scores are the
+        full unmasked vector; only the argmax is restricted.
         """
         if n_relax is None:
             n_relax = 10
@@ -2952,7 +2963,16 @@ class UERFExperience:
 
         _fn   = predict_fn if predict_fn is not None else self.predict
         scores = _fn()
-        result = int(scores.argmax()) if scores is not None else -1
+        if scores is None:
+            result = -1
+        elif domain_lo is not None and domain_hi is not None:
+            masked = scores.clone()
+            keep = torch.zeros_like(masked, dtype=torch.bool)
+            keep[domain_lo:domain_hi] = True
+            masked = masked.masked_fill(~keep, float('-inf'))
+            result = int(masked.argmax())
+        else:
+            result = int(scores.argmax())
         scores_out = scores.clone() if (return_scores and scores is not None) else None
 
         # Restore everything
