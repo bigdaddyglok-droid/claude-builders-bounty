@@ -2506,7 +2506,8 @@ class UERFLearning:
 for _m in ('_valence_per_osc', '_alpha_of_current_state', '_learn_bonds',
            '_prune_bonds', '_identity_drift', '_competitive_c_learning',
            '_contradiction', '_phantom_birth', '_age_and_cull',
-           'consolidate_class', 'grow_capacity', '_update_neuromodulators'):
+           'consolidate_class', 'grow_capacity', '_update_neuromodulators',
+           'start_emergent', 'birth_category'):
     setattr(UERFField, _m, getattr(UERFLearning, _m))
 
 
