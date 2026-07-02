@@ -732,6 +732,9 @@ class UERFField:
         # VACUUM reservoir (forgotten-but-recoverable) instead of staying frozen
         # forever. This makes consolidation reversible, like real memory.
         self._preservation = torch.ones(n_max, device=dev)
+        # Emergent-category bookkeeping: how many category slots have been born
+        # (0 until the first birth_category; unused by fixed-category brains).
+        self._active_categories = 0
 
         # ── Novelty tracking
         self._input_running_mean = None
@@ -2161,6 +2164,49 @@ class UERFLearning:
                     self.C_mask[:, dead_idx] = False
                     self.deaths += int(len(dead_idx))
 
+    def start_emergent(self):
+        """Put ALL category (teach) slots to sleep so the brain begins with NO
+        categories. Categories then come into being only via birth_category when
+        genuinely novel input arrives — nothing is pre-assigned. Call once, right
+        after construction, for an emergent-category brain."""
+        with torch.no_grad():
+            if self.t_start is None:
+                return
+            self.alive_mask[self.t_start:self.t_end] = False
+            self._active_categories = 0
+
+    def birth_category(self, input_sig=None):
+        """EMERGENT CATEGORY BIRTH. When the brain meets something that fits no
+        existing category, a new one comes into being: the next dormant teach
+        slot is woken, its identity direction c is tuned toward the pattern that
+        birthed it (so the category is 'about' what it first saw), and it becomes
+        a live readout. If the dormant reserve is exhausted, grow_capacity is
+        NOT enough (it grows interior, not teach) — we simply report -1 so the
+        caller can grow the teach region. Returns the new category index
+        (0-based within the teach block), or -1 if none free.
+
+        This is born-when-needed self-organization, the same pattern the interior
+        uses via _phantom_birth — applied to categories. No pre-assignment."""
+        with torch.no_grad():
+            if self.t_start is None:
+                return -1
+            teach_idx = torch.arange(self.t_start, self.t_end, device=self.device)
+            dormant = teach_idx[~self.alive_mask[teach_idx]]
+            if len(dormant) == 0:
+                return -1
+            slot = int(dormant[0].item())
+            cat = slot - self.t_start
+            self.alive_mask[slot] = True
+            # Tune the new category's identity to the pattern that birthed it, so
+            # it is selective for that pattern from the moment it exists.
+            if input_sig is not None:
+                sig = input_sig.to(self.device).reshape(-1)
+                n = sig.norm()
+                if n > 1e-6:
+                    self.c[slot] = sig / n
+            self._active_categories = max(getattr(self, '_active_categories', 0), cat + 1)
+            return cat
+
     def consolidate_class(self, class_id, n_lock=8):
         """
         Freeze top-n_lock interior oscillators that drive teaching slot
@@ -3203,6 +3249,8 @@ class UERFCheckpoint:
         '_last_grow_step',
         # graded consolidation strength (vacuum forget/recall memory)
         '_preservation',
+        # emergent-category count
+        '_active_categories',
     )
 
     def save_checkpoint(self, path):
