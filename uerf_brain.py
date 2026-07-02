@@ -2070,7 +2070,12 @@ class UERFLearning:
         FIX 5: More aggressive spawning with better initialization.
         """
         with torch.no_grad():
-            dormant = (~self.alive_mask).nonzero(as_tuple=True)[0]
+            # Interior neurogenesis populates dormant INTERIOR slots only —
+            # never dormant teach slots (reserved category capacity) or sensory
+            # slots. Otherwise a growing interior would cannibalize the category
+            # reserve and starve emergent category birth.
+            dormant = (~self.alive_mask & ~self._is_teaching
+                       & ~self._is_sensory).nonzero(as_tuple=True)[0]
             if len(dormant) == 0:
                 return 0
             k = min(n_spawn, len(dormant))

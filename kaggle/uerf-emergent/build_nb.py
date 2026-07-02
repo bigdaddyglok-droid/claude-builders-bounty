@@ -43,7 +43,7 @@ samp = torch.stack([flat(mn_tr[i][0]) for i in range(2000)] +
 mean_img = samp.mean(0)
 proj = SensoryProjection(RAW, N_SENS, seed=42, mean_raw=mean_img).to(dev)
 
-field = UERFField(n_max=500, n_initial=140, d=32, input_dim=N_SENS, n_classes=20)
+field = UERFField(n_max=500, n_initial=140, d=32, input_dim=N_SENS, n_classes=30)
 field.start_emergent()          # begin with NO categories
 print(f"[brain] alive={int(field.alive_mask.sum())} active_categories={field._active_categories}", flush=True)
 
