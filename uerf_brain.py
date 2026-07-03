@@ -717,6 +717,10 @@ class UERFField:
         self._teach_bond_sum = (torch.zeros(n_classes, n_max, d, d, device=dev)
                                 if n_classes else None)
         self._teach_bond_count = torch.zeros(n_classes if n_classes else 10, device=dev)
+        # Concept-relation web (understanding): symmetric graph of how strongly
+        # each concept co-activates with each other in the brain's perception.
+        self._concept_bonds = (torch.zeros(n_classes, n_classes, device=dev)
+                               if n_classes else None)
 
         # ── Class consolidation locks (DeepSeek #3 + framework crystallization)
         # _class_locked[i] = True → osc i frozen as part of a consolidated
@@ -2212,6 +2216,27 @@ class UERFLearning:
             self._active_categories = max(getattr(self, '_active_categories', 0), cat + 1)
             return cat
 
+    def concept_relations(self, top_k=3, active_only=True):
+        """Read the brain's learned concept-relation web: for each concept,
+        the top_k other concepts it most relates to (by co-activation). This is
+        the 'understanding' structure — what the brain thinks goes with what —
+        learned unsupervised from its own perception, separate from the readout.
+        Returns {concept_index: [(other_index, strength), ...]}."""
+        if self._concept_bonds is None:
+            return {}
+        W = self._concept_bonds
+        rels = {}
+        n = W.shape[0]
+        for i in range(n):
+            if active_only and not bool(self.alive_mask[self.t_start + i]):
+                continue
+            row = W[i].clone()
+            order = torch.argsort(row, descending=True)
+            picks = [(int(j), float(row[j])) for j in order[:top_k] if float(row[j]) > 1e-6]
+            if picks:
+                rels[i] = picks
+        return rels
+
     def consolidate_class(self, class_id, n_lock=8):
         """
         Freeze top-n_lock interior oscillators that drive teaching slot
@@ -2512,7 +2537,7 @@ for _m in ('_valence_per_osc', '_alpha_of_current_state', '_learn_bonds',
            '_prune_bonds', '_identity_drift', '_competitive_c_learning',
            '_contradiction', '_phantom_birth', '_age_and_cull',
            'consolidate_class', 'grow_capacity', '_update_neuromodulators',
-           'start_emergent', 'birth_category'):
+           'start_emergent', 'birth_category', 'concept_relations'):
     setattr(UERFField, _m, getattr(UERFLearning, _m))
 
 
@@ -2579,6 +2604,21 @@ class UERFExperience:
                 if pre_scores is not None:
                     true_class = int(teaching_vector.argmax().item())
                     self._prediction_correct = float(pre_class == true_class)
+                    # ── UNDERSTANDING: concept-to-concept relations ────────────
+                    # Concepts that co-activate in the brain's OWN perception
+                    # (pre_scores, before it's told the answer) become linked —
+                    # unsupervised "what relates to what". A '3' that also lights
+                    # up '8' teaches the brain 3~8. This builds a relational web
+                    # (self._concept_bonds) SEPARATE from the classifier readout,
+                    # so it adds comprehension without disturbing accuracy.
+                    if self._concept_bonds is not None:
+                        ps = pre_scores.detach().clamp(min=0)
+                        ps = ps / ps.max().clamp(min=1e-6)          # [0,1]
+                        ps = torch.where(ps > 0.5, ps, torch.zeros_like(ps))
+                        co = torch.outer(ps, ps)
+                        co.fill_diagonal_(0.0)
+                        self._concept_bonds = (0.999 * self._concept_bonds
+                                               + 0.001 * co)
                 else:
                     self._prediction_correct = 0.5
             else:
@@ -3257,6 +3297,8 @@ class UERFCheckpoint:
         '_preservation',
         # emergent-category count
         '_active_categories',
+        # concept-relation web (understanding)
+        '_concept_bonds',
     )
 
     def save_checkpoint(self, path):
