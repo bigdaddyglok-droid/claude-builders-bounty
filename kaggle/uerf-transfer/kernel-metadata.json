@@ -1,0 +1,14 @@
+{
+  "id": "blackloko/uerf-transfer",
+  "title": "UERF Transfer",
+  "code_file": "uerf_transfer.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}
