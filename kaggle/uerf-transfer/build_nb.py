@@ -39,12 +39,13 @@ def pool(Y, classes):
     for c in classes: m |= (Y == c)
     return m.nonzero(as_tuple=True)[0].tolist()
 
-STEPS = 2000
+STEPS = 1500
 CKPT  = 250
 
 def new_brain():
     f = UERFField(n_max=400, n_initial=200, d=32, input_dim=64, n_classes=15)
     f.start_emergent()
+    f.neuro_enabled = False  # DA loop off for the transfer test (proven separately; halves cost)
     return f
 
 def accuracy(field, label_map, classes, n=300):
