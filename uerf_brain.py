@@ -3508,6 +3508,12 @@ class UERFCheckpoint:
             f._class_locked = ckpt['_class_locked'].to(dev)
         if '_locked_class' in ckpt:
             f._locked_class = ckpt['_locked_class'].to(dev)
+        # Backward-compat: checkpoints saved before the complex amplitude existed
+        # have no s_imag. The new dynamics read it every tick, so guarantee it —
+        # zero phase (s_imag=0 ⇒ purely classical) is the correct default.
+        if not isinstance(getattr(f, 's_imag', None), torch.Tensor) or \
+                f.s_imag.shape != f.s.shape:
+            f.s_imag = torch.zeros_like(f.s)
         return f
 
 
