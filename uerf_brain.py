@@ -1517,18 +1517,25 @@ class UERFDynamics:
             sens_mag = drive_sens.norm(dim=-1)
             P_in = sens_mag ** 2
 
-            # INTEGRATED READOUT: the teach slot is driven by the WHOLE settled
-            # field, not an isolated sensory shortcut. drive = drive_sens +
-            # drive_recur, so both the sensor pattern AND the interior physics
-            # (the nodes whose states/regimes represent this input) push the slot.
-            # The signed projection onto the slot's identity c gives class-specific
-            # activation: the class whose field-representation the input evokes
-            # lights its slot. Discrimination now has to be earned by the field
-            # forming input-specific attractors — it is no longer hand-fed by a
-            # sensor-only path. (This is the un-walling of the readout.)
+            # TEACHING READOUT: Use ONLY sensory drive for teaching P_in.
+            #
+            # WHY: Interior oscillators converge to the same attractor regardless
+            # of input (recurrent bonds dominate). So drive_recur is input-INDEPENDENT.
+            # But drive_sens comes from sensor→teaching bonds, which encode the
+            # input pattern directly. Using only drive_sens makes the readout
+            # input-dependent, enabling discrimination.
+            #
+            # The signed projection onto c_i gives class-specific activation:
+            # - Bonds formed during class A training: C[teach0, sensor_j] = outer(c0, s_j_A)
+            # - During eval with A-input: drive_sens · c0 = sum_j (s_j_A_train · s_j_A_eval) > 0
+            # - During eval with B-input: drive_sens · c0 = sum_j (s_j_A_train · s_j_B_eval) ≈ 0
+            #   (because A and B inputs are different patterns)
+            # This creates natural discrimination WITHOUT forgetting.
             teach_mask = self._is_teaching
-            drive_proj = (drive * self.c).sum(-1)            # full field drive onto identity
-            P_in_teach = drive_proj.clamp(min=0.0) ** 2
+            # For teaching: use sensory drive only (input-dependent)
+            drive_sens_proj = (drive_sens * self.c).sum(-1)  # (n,)
+            P_in_teach = drive_sens_proj.clamp(min=0.0) ** 2
+            # Regular oscillators use full sensory drive norm
             P_in = torch.where(teach_mask, P_in_teach, P_in)
 
             # Teaching slots need a base alpha (moderate retention).
@@ -1570,8 +1577,8 @@ class UERFDynamics:
             phase_factor = (cos_node.unsqueeze(-1) * mean_cos_state.unsqueeze(0)
                             + sin_node.unsqueeze(-1) * mean_sin_state.unsqueeze(0))
             cross_flow = (C_rows * E_diff * w_states * phase_factor).sum(-1)
-            # Teaching slots participate in cross-state flow like every other node —
-            # the readout is part of the field, not insulated from its physics.
+            # Teaching slots don't participate in cross-state flow
+            cross_flow = torch.where(teach_mask, torch.zeros_like(cross_flow), cross_flow)
 
             # Eq 4: E[n+1] = α·E[n] + β·P_in + cross_flow
             E_next = alpha * E + beta * P_in + cross_flow
@@ -1945,37 +1952,72 @@ class UERFLearning:
                 del delta_C
 
             # PATHWAY 2: Teaching slots RECEIVE from sensors (readout pathway).
-            # INTEGRATED HEBBIAN READOUT — the answer comes from the whole field.
-            # The active class slot associates with the pattern that currently
-            # represents this input: the most-active INTERIOR oscillators (the
-            # physics representation — states, phase, cross-coupling) together with
-            # the sensors. Bonds move by a plasticity-gated EMA toward
-            # outer(slot_identity, source_state), so they stay bounded over many
-            # presentations. (Unbounded += over thousands of steps was the reason
-            # interior→teach was amputated; the honest fix is to BOUND the update
-            # and learn few-shot, not to cut the field out of its own readout.)
+            # Only the ACTIVE class slot is updated: its bonds accumulate the
+            # running mean of the (zero-mean) sensor pattern for that class.
+            # Inactive classes are left untouched — disjoint per-class storage is
+            # what gives the zero-forgetting guarantee. Discrimination does NOT
+            # come from anti-Hebbian weakening here (that would couple classes
+            # and break disjoint storage); it comes from the zero-mean sensory
+            # encoding (see SensoryProjection.mean_raw), which removes the
+            # common-mode so each class's stored mean is its distinctive pattern.
             if self.t_start is not None:
                 t0, t1 = self.t_start, self.t_end
-                teach_c = c[t0:t1]                              # (n_classes, d)
-                active_class = s[t0:t1].norm(dim=-1).argmax().item()
-                target_dir = teach_c[active_class]
+                n_cls = t1 - t0
+                teach_c = c[t0:t1]  # (n_classes, d)
 
+                # Determine which class is currently active (highest pinned magnitude)
+                teach_mags = s[t0:t1].norm(dim=-1)
+                active_class = teach_mags.argmax().item()
+
+                # Interior oscillators that will form readout bonds
                 interior_idx = interior.nonzero(as_tuple=True)[0]
-                if len(interior_idx) > 40:
-                    _, tk = mag[interior_idx].topk(40)
-                    interior_idx = interior_idx[tk]
-                sensor_idx = sens.nonzero(as_tuple=True)[0]
-                src_idx = torch.cat([interior_idx, sensor_idx])
-                if len(src_idx) > 0:
-                    s_src = s[src_idx]                          # (m, d)
-                    live = s_src.norm(dim=-1) > 1e-6
-                    if bool(live.any()):
-                        src_idx = src_idx[live]; s_src = s_src[live]
-                        outers = torch.einsum('d,me->mde', target_dir, s_src)  # (m,d,d)
-                        _ach = float(self._neuro.get('ach', 1.0))
-                        lr = min(0.5, 0.15 * _ach)             # plasticity-gated Hebbian rate
-                        cur = self.C[t0 + active_class, src_idx]
-                        self.C[t0 + active_class, src_idx] = (1 - lr) * cur + lr * outers
+                # Use top-k most active interior oscillators for efficiency
+                int_mags = mag[interior_idx]
+                n_bond_targets = min(40, len(interior_idx))
+                if len(interior_idx) > n_bond_targets:
+                    _, top_k = int_mags.topk(n_bond_targets)
+                    bond_idx = interior_idx[top_k]
+                else:
+                    bond_idx = interior_idx
+
+                if len(bond_idx) > 0:
+                    # SENSORY-BASED READOUT — TRUE RUNNING MEAN (not EMA).
+                    #
+                    # Bonds for class c are the MEAN outer-product over all
+                    # examples of class c. Phase B examples for classes 5-9
+                    # only update the accumulators for classes 5-9. Phase A
+                    # bonds (classes 0-4) never decay or drift — they stay
+                    # as the mean of Phase A inputs forever.
+                    #
+                    # This solves catastrophic forgetting at the bond level:
+                    # the bonds for different classes are stored in disjoint
+                    # accumulator slices and never overwrite each other.
+                    sensor_idx = sens.nonzero(as_tuple=True)[0]
+                    if self._teach_bond_sum is not None and len(sensor_idx) > 0:
+                        self._teach_bond_count[active_class] += 1
+                        count = self._teach_bond_count[active_class].item()
+                        target_dir = teach_c[active_class]
+                        # Vectorized accumulator update for all sensors at once
+                        s_sensors = s[sensor_idx]                   # (n_sens, d)
+                        s_norms = s_sensors.norm(dim=-1)
+                        valid = s_norms > 1e-6
+                        if valid.any():
+                            # outer(target_dir, s_j) for each sensor j
+                            outers = torch.einsum('d,je->jde',
+                                                  target_dir, s_sensors)  # (n_sens, d, d)
+                            self._teach_bond_sum[active_class, sensor_idx] += outers
+                        # Write the mean to actual bond matrix
+                        # (do this every step, cheap relative to dynamics)
+                        if count >= 1:
+                            mean_bonds = (self._teach_bond_sum[active_class, sensor_idx]
+                                          / count)
+                            self.C[t0 + active_class, sensor_idx] = mean_bonds
+
+                    # The readout is the clean sensor→teach mean accumulator
+                    # above. (Additive interior→teach bonds were removed: over
+                    # thousands of steps they grew via += and dominated the
+                    # normalized sensor bonds, polluting the discriminative
+                    # readout.) Inactive classes are untouched here.
 
             # PATHWAY 3: Sensor → Interior bonds (input pathway)
             # Sensors are pinned, so their bonds TO interior should strengthen
