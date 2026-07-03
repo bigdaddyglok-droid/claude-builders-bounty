@@ -39,13 +39,13 @@ def poolof(cs):
     return m.nonzero(as_tuple=True)[0].tolist()
 poolA,poolB=poolof(A),poolof(B)
 
-STEPS=2500
+STEPS=1000
 def make(quantum):
     torch.manual_seed(369)
     f=UERFField(n_max=400,n_initial=200,d=32,input_dim=64,n_classes=15)
     f.start_emergent()
     if not quantum:
-        f._quantum_evolve = (lambda new_s, alpha: new_s).__get__(f)  # neutralize
+        f._quantum_evolve = lambda new_s, alpha: new_s  # neutralize (instance attr, no self)
     return f
 
 def run(field, label, tag):
