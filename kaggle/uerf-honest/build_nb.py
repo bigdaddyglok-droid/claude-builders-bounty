@@ -44,14 +44,14 @@ def fresh_proj():
     # ONLINE centering — the brain computes its own DC estimate. No dataset mean.
     return SensoryProjection(784,64,seed=42,online=True,ema=0.03).to(dev)
 
-def probe(field,enc,label,classes=None):
+def probe(field,proj_,label,classes=None):
     inv={v:d for d,v in label.items()}
     lo,hi=min(label.values()),max(label.values())+1        # over BORN categories only
     c=t=0
     for i in PROBE:
         y=int(Yte[i])
         if classes is not None and y not in classes: continue
-        p=field.eval_predict(enc(Xte[i]),domain_lo=lo,domain_hi=hi)
+        p=field.eval_predict(proj_(Xte[i].to(dev)),domain_lo=lo,domain_hi=hi)  # Xte already flat
         c+=int(inv.get(p)==y); t+=1
     return 100.0*c/max(t,1)
 
@@ -74,7 +74,7 @@ for step,(d,i) in enumerate(order,1):
     f.experience(x,teaching_vector=tv,n_relax=6,domain_lo=0,domain_hi=f.n_classes)
     sur.append(float(getattr(f,"_input_surprise",0.0)))
     if step in sched:
-        a=probe(f,encimg,label)
+        a=probe(f,proj,label)
         curve.append((step,a))
         print(f"  seen {step:>4} ({step//10:>2} shots/class)  acc {a:5.1f}%   surprise {np.mean(sur[-10:]):.2f}",flush=True)
 one=[a for s,a in curve if s==10][0]
@@ -90,8 +90,8 @@ def teach(classes,shots=8):
                 sig=(x.unsqueeze(-1)*f2.c[:f2.input_dim]).sum(0); label2[d]=f2.birth_category(sig)
             tv=torch.zeros(f2.n_classes,device=dev); tv[label2[d]]=1.0
             f2.experience(x,teaching_vector=tv,n_relax=6,domain_lo=0,domain_hi=f2.n_classes)
-teach(range(0,5)); A_before=probe(f2,enc2,label2,classes=set(range(5)))
-teach(range(5,10)); A_after=probe(f2,enc2,label2,classes=set(range(5))); B=probe(f2,enc2,label2,classes=set(range(5,10)))
+teach(range(0,5)); A_before=probe(f2,proj2,label2,classes=set(range(5)))
+teach(range(5,10)); A_after=probe(f2,proj2,label2,classes=set(range(5))); B=probe(f2,proj2,label2,classes=set(range(5,10)))
 
 print("\n"+"="*64); print(" TRUE REPORT (no crutches)"); print("="*64)
 print(f"  one-shot (1 ex/class, 10 imgs)   : {one:.1f}%   (chance 10%)")
