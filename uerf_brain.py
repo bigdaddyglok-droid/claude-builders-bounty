@@ -2943,19 +2943,13 @@ class UERFExperience:
                 #  teach-bond accumulators)
 
     def predict(self):
-        """Read out teaching-slot magnitudes as class scores. If the readout
-        has been calibrated (calibrate_readout), each class slot's magnitude is
-        de-biased by its unsupervised mean/std so a chronically-large slot can
-        no longer dominate the argmax. Training-free; no labels, no fitted head."""
+        """Read out teaching-slot magnitudes as class scores. The class whose
+        associative (sensor→teach) bonds the input evokes lights its slot the
+        brightest. Training-free; no labels, no fitted head, no calibration."""
         if self.t_start is None:
             return None
         teach_s = self.s[self.t_start:self.t_end]
-        norms = teach_s.norm(dim=-1)
-        mu = getattr(self, '_readout_mu', None)
-        sd = getattr(self, '_readout_sigma', None)
-        if mu is not None and sd is not None:
-            return (norms - mu) / sd.clamp(min=1e-6)
-        return norms
+        return teach_s.norm(dim=-1)
 
     def predict_aware(self):
         """Self-aware readout: magnitude × holographic quality gate.
@@ -2981,11 +2975,6 @@ class UERFExperience:
         teach_s = self.s[self.t_start:self.t_end]    # (n_classes, d)
         norms   = teach_s.norm(dim=-1)               # carrier signal
 
-        mu = getattr(self, '_readout_mu', None)
-        sd = getattr(self, '_readout_sigma', None)
-        if mu is not None and sd is not None:
-            norms = (norms - mu) / sd.clamp(min=1e-6)
-
         if self._holo_projector is None:
             return norms
 
@@ -2998,206 +2987,6 @@ class UERFExperience:
         holo_a     = holo_a.clamp(0.0, 1.0)
 
         return norms * (0.5 + 0.5 * holo_a)
-
-    def calibrate_readout(self, inputs, n_relax=None):
-        """Unsupervised, training-free readout calibration. Runs eval-mode
-        inference over UNLABELED inputs and records each class slot's mean and
-        std response magnitude. predict() then de-biases per slot. Works on any
-        existing checkpoint; uses no labels and trains nothing."""
-        if self.t_start is None:
-            return None
-        self._readout_mu = None
-        self._readout_sigma = None
-        rows = []
-        for x in inputs:
-            _, sc = self.eval_predict(x, n_relax=n_relax, return_scores=True)
-            if sc is not None:
-                rows.append(sc)
-        if not rows:
-            return None
-        M = torch.stack(rows, 0)
-        self._readout_mu = M.mean(0)
-        self._readout_sigma = M.std(0).clamp(min=1e-6)
-        return {'n_calib': len(rows)}
-
-    def predict_scores(self):
-        """Alias for predict(): returns the class-score vector (same calibration
-        as predict — z-score de-biased when _readout_mu/_readout_sigma are set)."""
-        return self.predict()
-
-    def fit_teach_templates(self, xs, ys, n_relax=None, domain_lo=None, domain_hi=None):
-        """
-        Labeled calibration pass: for each (input, label) pair, capture the
-        teach-slot state after eval relaxation and accumulate per-class means.
-        Stores self._teach_templates: (n_classes, d) unit-normalized tensor.
-
-        domain_lo / domain_hi: if set, only accumulate stats for the slot range
-        [domain_lo:domain_hi] (e.g. slots 0-9 for MNIST). Labels must be global
-        slot indices (i.e. already offset: MNIST y, CIFAR y+10, TI y+110).
-        """
-        if self.t_start is None:
-            return
-        sums   = torch.zeros(self.n_classes, self.d, device=self.device)
-        counts = torch.zeros(self.n_classes, device=self.device)
-        for x, y in zip(xs, ys):
-            holder = {}
-            orig = self.predict
-            def _probe(_orig=orig):
-                holder['tv'] = self.s[self.t_start:self.t_end].clone()
-                return _orig()
-            self.predict = _probe
-            self.eval_predict(x, n_relax=n_relax)
-            self.predict = orig
-            if 'tv' not in holder:
-                continue
-            y_int = int(y)
-            if 0 <= y_int < self.n_classes:
-                if domain_lo is not None and not (domain_lo <= y_int < domain_hi):
-                    continue
-                sums[y_int]   += holder['tv'][y_int]
-                counts[y_int] += 1
-        mask = counts > 0
-        self._teach_templates = sums.clone()
-        self._teach_templates[mask] = (sums[mask] /
-                                       counts[mask].unsqueeze(-1).clamp(min=1e-8))
-        norms = self._teach_templates.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-        self._teach_templates = self._teach_templates / norms
-        n_fit = int(mask.sum())
-        print(f"[fit_teach_templates] {n_fit}/{self.n_classes} class templates fitted", flush=True)
-        return n_fit
-
-    def predict_template(self, domain_lo=None, domain_hi=None):
-        """
-        Nearest-prototype readout using stored teach templates.
-        Compare current teach-slot states (full d-dim) against per-class
-        templates with cosine similarity — 32x more signal than scalar norm.
-        Optional domain masking restricts argmax to slots [domain_lo:domain_hi].
-        Falls back to predict() if templates haven't been fitted.
-        """
-        if self.t_start is None:
-            return self.predict()
-        if not hasattr(self, '_teach_templates') or self._teach_templates is None:
-            return self.predict()
-        tv   = self.s[self.t_start:self.t_end]                          # (n_cls, d)
-        tv_n = tv / tv.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-        sims = (tv_n * self._teach_templates).sum(-1)                    # (n_cls,)
-        if domain_lo is not None and domain_hi is not None:
-            mask = torch.zeros(self.n_classes, dtype=torch.bool, device=self.device)
-            mask[domain_lo:domain_hi] = True
-            sims = sims.masked_fill(~mask, -1e9)
-        return sims
-
-    def eval_predict_template(self, x, n_relax=None, domain_lo=None, domain_hi=None):
-        """Non-destructive eval using the template-based nearest-prototype readout."""
-        if self.t_start is None:
-            return -1
-        holder = {}
-        orig = self.predict
-        def _tmpl_predict(_orig=orig):
-            sims = self.predict_template(domain_lo=domain_lo, domain_hi=domain_hi)
-            holder['sims'] = sims.clone() if sims is not None else None
-            return _orig()
-        self.predict = _tmpl_predict
-        self.eval_predict(x, n_relax=n_relax)
-        self.predict = orig
-        if holder.get('sims') is not None:
-            return int(holder['sims'].argmax())
-        return -1
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # NATIVE FULL-FIELD READOUT
-    #
-    # The default predict() collapses each teach slot's d-dim state to a single
-    # magnitude and argmaxes — discarding 31/32 of the signal the field actually
-    # holds. This reads the WHOLE settled teach-field (n_classes × d) and
-    # matches an input against per-class prototypes. NOTE: the prototypes are
-    # built by build_self_catalog() from explicit labeled calibration examples
-    # (extra_xs/extra_ys) — this is an external nearest-prototype head, NOT a
-    # self-supervised / replay-buffer mechanism. (There is no replay buffer; it
-    # was removed.) Its value is using the full field response rather than the
-    # scalar magnitude, not label-free recognition.
-    # ─────────────────────────────────────────────────────────────────────────
-    def _capture_teach_field(self, x, n_relax=None):
-        """Run a non-destructive eval pass and return the settled full teach
-        field flattened to (n_classes*d,). None if no teach slots."""
-        if self.t_start is None:
-            return None
-        holder = {}
-        orig = self.predict
-        def _grab(_o=orig):
-            holder['f'] = self.s[self.t_start:self.t_end].flatten().clone()
-            return _o()
-        self.predict = _grab
-        self.eval_predict(x, n_relax=n_relax)
-        self.predict = orig
-        return holder.get('f', None)
-
-    def build_self_catalog(self, n_relax=None, extra_xs=None, extra_ys=None):
-        """Build per-class full-field prototypes the brain reads itself by.
-
-        Built from explicit calibration examples (extra_xs/extra_ys, already
-        class-offset labels). Stores self._field_catalog:
-        (n_classes, n_classes*d) unit-normalized; classes with no memory stay 0.
-        """
-        if self.t_start is None:
-            return 0
-        D = self.n_classes * self.d
-        sums   = torch.zeros(self.n_classes, D, device=self.device)
-        counts = torch.zeros(self.n_classes, device=self.device)
-
-        if extra_xs is not None and extra_ys is not None:
-            for x, y in zip(extra_xs, extra_ys):
-                y = int(y)
-                if not (0 <= y < self.n_classes):
-                    continue
-                f = self._capture_teach_field(x.to(self.device), n_relax=n_relax)
-                if f is not None:
-                    sums[y] += f
-                    counts[y] += 1
-
-        mask = counts > 0
-        proto = torch.zeros_like(sums)
-        proto[mask] = sums[mask] / counts[mask].unsqueeze(-1)
-        norms = proto.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-        self._field_catalog = proto / norms
-        n_fit = int(mask.sum())
-        print(f"[build_self_catalog] {n_fit}/{self.n_classes} class prototypes "
-              f"from {int(counts.sum())} calibration examples", flush=True)
-        return n_fit
-
-    def predict_native(self, domain_lo=None, domain_hi=None):
-        """Full-field recognition. Compares the current settled teach-field
-        against the brain's self-built catalog. Falls back to predict() if no
-        catalog exists. Returns per-class similarity scores (argmax = answer)."""
-        if self.t_start is None:
-            return self.predict()
-        if getattr(self, '_field_catalog', None) is None:
-            return self.predict()
-        f = self.s[self.t_start:self.t_end].flatten()
-        f = f / f.norm().clamp(min=1e-8)
-        sims = (self._field_catalog * f.unsqueeze(0)).sum(-1)   # (n_classes,)
-        if domain_lo is not None and domain_hi is not None:
-            mask = torch.zeros(self.n_classes, dtype=torch.bool, device=self.device)
-            mask[domain_lo:domain_hi] = True
-            sims = sims.masked_fill(~mask, -1e9)
-        return sims
-
-    def eval_predict_native(self, x, n_relax=None, domain_lo=None, domain_hi=None):
-        """Non-destructive eval using the native full-field readout."""
-        if self.t_start is None:
-            return -1
-        holder = {}
-        orig = self.predict
-        def _native(_o=orig):
-            sims = self.predict_native(domain_lo=domain_lo, domain_hi=domain_hi)
-            holder['sims'] = sims.clone() if sims is not None else None
-            return _o()
-        self.predict = _native
-        self.eval_predict(x, n_relax=n_relax)
-        self.predict = orig
-        if holder.get('sims') is not None:
-            return int(holder['sims'].argmax())
-        return -1
 
     def eval_predict(self, x, n_relax=None, bond_chunk=256, return_scores=False,
                      predict_fn=None, domain_lo=None, domain_hi=None):
@@ -3392,11 +3181,8 @@ class UERFExperience:
 
 
 # Attach experience methods
-for _m in ('experience', 'predict', 'predict_aware', 'predict_scores',
-           'eval_predict', 'eval_predict_aware',
-           'calibrate_readout', 'fit_teach_templates', 'predict_template',
-           'eval_predict_template', '_capture_teach_field', 'build_self_catalog',
-           'predict_native', 'eval_predict_native'):
+for _m in ('experience', 'predict', 'predict_aware',
+           'eval_predict', 'eval_predict_aware'):
     setattr(UERFField, _m, getattr(UERFExperience, _m))
 
 
@@ -3441,10 +3227,8 @@ class UERFCheckpoint:
         # neuromodulation
         'neuro_enabled', '_neuro', '_mean_valence_prev',
         # native full-field readout catalog
-        '_field_catalog',
         # readout calibration + template heads (used at inference; must persist
         # or a resumed brain silently reverts to a different readout)
-        '_readout_mu', '_readout_sigma', '_teach_templates',
         # neurogenesis refractory
         '_last_grow_step',
         # graded consolidation strength (vacuum forget/recall memory)
