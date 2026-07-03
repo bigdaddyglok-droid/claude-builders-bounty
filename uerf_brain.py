@@ -553,6 +553,69 @@ class SensoryProjection:
         return self
 
 
+class HarmonicRetina:
+    """Physics-legal front-end built from the framework's OWN math — no random
+    weights, no learned parameters, no pretrained anything.
+
+    The image is projected onto 2D Bessel standing-wave modes J_h(k·R)·e^{ihφ}
+    (State 10 TOROIDAL: "1 + κ Σ_{h∈{3,6,9}} J_h(k·R)") at the h∈{3,6,9}
+    super-resonance harmonics (State 8 HARMONIC: "f/f_0 = 3,6,9 → superresonance"),
+    placed at a grid of LOCAL centres across fractal scales k = k0·λ^s (State 11
+    FRACTAL: "self-similarity across scales, λ^{-D_f·k}"). Each mode's response is
+    read by MAGNITUDE |⟨x, mode⟩| — a circular-harmonic power that is tolerant to
+    translation (Fourier shift theorem) and in-patch rotation. So the field
+    receives the image's geometry — edges, loops, curvature, at position and
+    scale — instead of random pixel soup. This is the retina the framework
+    specifies; it replaces SensoryProjection's random W with the doc's physics."""
+    def __init__(self, img_hw=28, harmonics=(3, 6, 9), n_scales=2, lam=1.618,
+                 centers_per_side=3, patch_frac=0.6, mean_raw=None):
+        import numpy as np
+        from scipy.special import jv
+        H = img_hw
+        ys, xs = np.mgrid[0:H, 0:H].astype(np.float32)
+        cs = np.linspace(H * 0.25, H * 0.75, centers_per_side)
+        patch_sigma = patch_frac * (H / centers_per_side)
+        k0 = math.pi / (H * 0.5)                 # ~one wavelength across half-image
+        cols_r, cols_i = [], []
+        for s in range(n_scales):
+            k = k0 * (lam ** s)
+            for cy in cs:
+                for cx in cs:
+                    dx, dy = xs - cx, ys - cy
+                    R = np.sqrt(dx * dx + dy * dy)
+                    phi = np.arctan2(dy, dx)
+                    win = np.exp(-(R ** 2) / (2 * patch_sigma ** 2))   # local window
+                    for h in harmonics:
+                        radial = jv(h, k * R)
+                        cols_r.append((radial * np.cos(h * phi) * win).ravel())
+                        cols_i.append((radial * np.sin(h * phi) * win).ravel())
+        Wr = np.stack(cols_r, 1)
+        Wi = np.stack(cols_i, 1)
+        nrm = np.sqrt((Wr ** 2 + Wi ** 2).sum(0, keepdims=True))
+        nrm[nrm < 1e-8] = 1.0
+        self.Wr = torch.tensor(Wr / nrm, dtype=torch.float32)
+        self.Wi = torch.tensor(Wi / nrm, dtype=torch.float32)
+        self.n_sensory = self.Wr.shape[1]
+        self.mean_raw = mean_raw if mean_raw is None else mean_raw.reshape(-1)
+
+    def __call__(self, x):
+        """Raw image x (H*H,) → (n_sensory,) circular-harmonic magnitude features."""
+        x = x.to(self.Wr.device)
+        if self.mean_raw is not None:
+            x = x - self.mean_raw
+        re = x @ self.Wr
+        im = x @ self.Wi
+        feat = torch.sqrt(re * re + im * im)     # |response| — shift/rotation tolerant
+        return feat / feat.norm().clamp(min=1e-6)
+
+    def to(self, device):
+        self.Wr = self.Wr.to(device)
+        self.Wi = self.Wi.to(device)
+        if self.mean_raw is not None:
+            self.mean_raw = self.mean_raw.to(device)
+        return self
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # UTILITY
 # ═══════════════════════════════════════════════════════════════════════════════
