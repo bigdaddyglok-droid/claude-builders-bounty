@@ -1,0 +1,14 @@
+{
+  "id": "blackloko/uerf-fewshot",
+  "title": "UERF Fewshot",
+  "code_file": "uerf_fewshot.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": ["blackloko/uerf-consolidated"]
+}
