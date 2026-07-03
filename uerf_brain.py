@@ -531,16 +531,30 @@ class SensoryProjection:
     correction. The reference is frozen (not a drifting running mean) so a
     class's bonds are centred against the same reference at train and eval time
     across all later phases (preserves the zero-forgetting guarantee)."""
-    def __init__(self, raw_dim, n_sensory, seed=42, mean_raw=None):
+    def __init__(self, raw_dim, n_sensory, seed=42, mean_raw=None,
+                 online=False, ema=0.02):
         rng = torch.Generator().manual_seed(seed)
         self.W = torch.randn(raw_dim, n_sensory, generator=rng) / math.sqrt(raw_dim)
         self.n_sensory = n_sensory
         self.mean_raw = mean_raw if mean_raw is None else mean_raw.reshape(-1)
+        # ONLINE centering: the brain estimates the DC (common-mode) itself from
+        # the stream — no offline dataset mean. This is honest sensory adaptation
+        # (retinal/cortical gain control removes the DC), computed from what the
+        # brain has actually seen, not a precomputed dataset statistic.
+        self.online = online
+        self._ema = ema
+        self._run_mean = None
 
     def __call__(self, x):
         """Project raw input x (raw_dim,) → (n_sensory,) normalized."""
         x = x.to(self.W.device)
-        if self.mean_raw is not None:
+        if self.online:
+            if self._run_mean is None:
+                self._run_mean = x.clone()
+            centered = x - self._run_mean
+            self._run_mean = (1 - self._ema) * self._run_mean + self._ema * x   # toward raw x
+            x = centered
+        elif self.mean_raw is not None:
             x = x - self.mean_raw
         out = x @ self.W
         return out / out.norm().clamp(min=1e-6)
@@ -550,6 +564,8 @@ class SensoryProjection:
         self.W = self.W.to(device)
         if self.mean_raw is not None:
             self.mean_raw = self.mean_raw.to(device)
+        if self._run_mean is not None:
+            self._run_mean = self._run_mean.to(device)
         return self
 
 
