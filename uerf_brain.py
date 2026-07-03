@@ -611,6 +611,10 @@ class UERFField:
 
         # ── d-dim state vectors
         self.s = torch.zeros(n_max, d, device=dev)
+        # Imaginary part of the complex amplitude ψ = s + i·s_imag. Only
+        # oscillators in the QUANTUM/QUBIT states carry a non-zero imaginary
+        # component (genuine superposition); everyone else stays purely real.
+        self.s_imag = torch.zeros(n_max, d, device=dev)
         cr = torch.randn(n_max, d, device=dev)
         self.c = cr / cr.norm(dim=1, keepdim=True).clamp(min=1e-8)
 
@@ -1575,6 +1579,11 @@ class UERFDynamics:
             if frozen.any():
                 new_s = torch.where(frozen.unsqueeze(-1), self.s, new_s)
 
+            # Literal quantum evolution: nodes in QUANTUM/QUBIT states advance
+            # their complex amplitude unitarily (superposition + Lindblad
+            # decoherence). Purely real / no-op for every other node.
+            new_s = self._quantum_evolve(new_s, alpha)
+
             self.s = new_s * alive.float().unsqueeze(-1)
 
             # 6. Update state variables
@@ -1675,9 +1684,68 @@ class UERFDynamics:
             self._prev_s = s.clone()
 
 
+    def _quantum_evolve(self, new_s, alpha):
+        """LITERAL quantum evolution for oscillators in the QUANTUM / QUBIT
+        states, implementing the framework doc's Eq 2/5 for those regimes:
+
+          ψ = s + i·s_imag                       (complex amplitude / pure state)
+          ψ[n+1] = U(α)·ψ[n]                      unitary: U = exp(-i H dt)
+          then a Lindblad dissipator damps coherence (the imaginary/off-basis
+          part) at rate γ/preservation           (decoherence toward classical)
+          norm is conserved                       (unitarity; energy Tr(ρH) stable)
+
+        H is diagonal in the identity basis with per-mode energies ω_j drawn
+        from the oscillator's own spectrum (f, |c|), so the phase each amplitude
+        accrues is the node's intrinsic frequency — genuine coherent evolution,
+        not a scalar multiplier. The field only ever *measures* the real part
+        (Born observable), so the rest of the brain is unaffected; superposition
+        lives entirely inside the quantum-state nodes between measurements.
+
+        Purely real fallback: with s_imag=0 and no phase this reduces to identity,
+        so a node that never enters a quantum state behaves exactly as before."""
+        qmask = (self.state_id == S_QUANTUM) | (self.state_id == S_QUBIT)
+        # nodes that just LEFT a quantum state decohere fully (measurement)
+        left = (~qmask) & (self.s_imag.abs().sum(-1) > 0)
+        if left.any():
+            self.s_imag = self.s_imag.clone()
+            self.s_imag[left] = 0.0
+        if not bool(qmask.any()):
+            return new_s
+        idx = qmask.nonzero(as_tuple=True)[0]
+        psi_r = new_s[idx]                                  # (k, d) real amplitude
+        psi_i = self.s_imag[idx]                            # (k, d) imag amplitude
+        a = alpha[idx].clamp(0.0, 1.0).unsqueeze(-1)        # (k,1)
+
+        # ── Unitary U = exp(-iH dt): per-mode Hamiltonian energies ω_j ───────
+        omega = (self.c[idx].abs() * self.f[idx].unsqueeze(-1))   # (k,d) mode energies
+        dt = (1.0 - a)                                       # more evolution when α<1
+        phase = omega * dt * math.pi
+        cos_p, sin_p = torch.cos(phase), torch.sin(phase)
+        # e^{-iθ}(ψ_r + iψ_i) = (cosθ ψ_r + sinθ ψ_i) + i(cosθ ψ_i − sinθ ψ_r)
+        nr = cos_p * psi_r + sin_p * psi_i
+        ni = cos_p * psi_i - sin_p * psi_r
+
+        # ── Lindblad decoherence: damp the coherent (imag) part ─────────────
+        gamma = (1.0 - a.squeeze(-1)) / self._preservation[idx].clamp(min=0.1)
+        ni = ni * torch.exp(-0.5 * gamma).unsqueeze(-1)
+
+        # ── conserve norm (unitarity → energy Tr(ρH) preserved) ─────────────
+        n_old = (psi_r ** 2 + psi_i ** 2).sum(-1, keepdim=True).sqrt().clamp(min=1e-8)
+        n_new = (nr ** 2 + ni ** 2).sum(-1, keepdim=True).sqrt().clamp(min=1e-8)
+        scale = n_old / n_new
+        nr = nr * scale
+        ni = ni * scale
+
+        out = new_s.clone()
+        out[idx] = nr
+        self.s_imag = self.s_imag.clone()
+        self.s_imag[idx] = ni
+        return out
+
+
 # Attach dynamics methods to UERFField
 for _m in ('_build_routing_ctx', '_route_states', '_bond_inputs', '_update_phase',
-           '_dynamics_step', '_update_state_variables'):
+           '_dynamics_step', '_update_state_variables', '_quantum_evolve'):
     setattr(UERFField, _m, getattr(UERFDynamics, _m))
 
 
@@ -2391,7 +2459,7 @@ class UERFLearning:
                 setattr(self, attr, torch.cat([cur, add], dim=0))
 
             # ── 2-D per-osc state tensors  (n_max, d)
-            for attr in ['s', 'future_prediction', '_prev_prediction']:
+            for attr in ['s', 's_imag', 'future_prediction', '_prev_prediction']:
                 if not hasattr(self, attr):
                     continue
                 cur = getattr(self, attr)
@@ -3065,6 +3133,7 @@ class UERFExperience:
         # Save complete state
         save = {
             's': self.s.clone(),
+            's_imag': self.s_imag.clone(),
             'state_id': self.state_id.clone(),
             'phase_vec': self.phase_vec.clone(),
             'gamma': self.gamma.clone(),
@@ -3260,7 +3329,7 @@ class UERFCheckpoint:
         # identity tensors
         'theta', 'S', 'f', 'N', 'a0', 'age', 'alive_mask',
         # state
-        's', 'c', 'phase_vec', 'state_id',
+        's', 's_imag', 'c', 'phase_vec', 'state_id',
         # bonds
         'C', 'C_mask',
         # slot tags
