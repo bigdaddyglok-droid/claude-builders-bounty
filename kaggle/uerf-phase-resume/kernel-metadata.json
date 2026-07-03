@@ -1,0 +1,14 @@
+{
+  "id": "blackloko/uerf-phase-resume",
+  "title": "UERF Phase Resume",
+  "code_file": "uerf_phase_resume.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": ["blackloko/uerf-consolidated"]
+}

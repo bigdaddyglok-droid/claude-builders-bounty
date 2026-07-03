@@ -1544,17 +1544,39 @@ class UERFDynamics:
                                 alpha)
 
             # Cross-state energy flow (Unified Master Equation)
+            #   E flow_i = Σ_j C_ij · w_j · (E_j − E_i) · cos(φ_ij)
+            # The cos(φ_ij) is the framework's PHASE ANGLE BETWEEN STATES — the
+            # term that turns coupling into interference. φ_i is each node's
+            # accrued quantum phase (angle of its complex amplitude ψ=s+i·s_imag
+            # along its own identity c); φ_ij = φ_i − φ_state_j. Coherent nodes
+            # whose phase aligns with a state couple constructively (cos→+1);
+            # anti-aligned nodes couple destructively (cos→−1). Purely classical
+            # nodes carry s_imag=0 ⇒ φ=0 ⇒ cos=1, recovering plain diffusion —
+            # so this is a strict generalization, on for everyone, no toggle.
             mean_E_per_state = torch.zeros(N_STATE_SLOTS, device=self.device)
+            mean_cos_state   = torch.ones(N_STATE_SLOTS, device=self.device)
+            mean_sin_state   = torch.zeros(N_STATE_SLOTS, device=self.device)
+            # per-node phase of the complex amplitude along identity c
+            s_re_proj = (self.s * self.c).sum(-1)
+            s_im_proj = (self.s_imag * self.c).sum(-1)
+            phi_node  = torch.atan2(s_im_proj, s_re_proj)   # 0 where s_imag=0
+            cos_node  = torch.cos(phi_node)
+            sin_node  = torch.sin(phi_node)
             for sid in self.CANDIDATE_STATES:
                 mask_sid = (self.state_id == sid) & alive
                 if mask_sid.any():
                     mean_E_per_state[sid] = E[mask_sid].mean()
+                    mean_cos_state[sid]   = cos_node[mask_sid].mean()
+                    mean_sin_state[sid]   = sin_node[mask_sid].mean()
 
             sid_per_osc = self.state_id
             C_rows = self.C_states[sid_per_osc]
             E_diff = mean_E_per_state.unsqueeze(0) - E.unsqueeze(-1)
             w_states = self.state_weights[:N_STATE_SLOTS].unsqueeze(0)
-            cross_flow = (C_rows * E_diff * w_states).sum(-1)
+            # cos(φ_i − φ_j) = cosφ_i·cosφ_j + sinφ_i·sinφ_j  (circular-mean state phase)
+            phase_factor = (cos_node.unsqueeze(-1) * mean_cos_state.unsqueeze(0)
+                            + sin_node.unsqueeze(-1) * mean_sin_state.unsqueeze(0))
+            cross_flow = (C_rows * E_diff * w_states * phase_factor).sum(-1)
             # Teaching slots don't participate in cross-state flow
             cross_flow = torch.where(teach_mask, torch.zeros_like(cross_flow), cross_flow)
 
