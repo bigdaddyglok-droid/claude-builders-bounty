@@ -1,6 +1,6 @@
 {
-  "id": "blackloko/uerf-fewshot",
-  "title": "UERF Fewshot",
+  "id": "blackloko/uerf-fewshot-resume",
+  "title": "UERF Fewshot Resume",
   "code_file": "uerf_fewshot.ipynb",
   "language": "python",
   "kernel_type": "notebook",
@@ -10,5 +10,7 @@
   "enable_internet": true,
   "dataset_sources": [],
   "competition_sources": [],
-  "kernel_sources": ["blackloko/uerf-consolidated"]
+  "kernel_sources": [
+    "blackloko/uerf-consolidated"
+  ]
 }
