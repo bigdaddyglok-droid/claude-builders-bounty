@@ -87,6 +87,24 @@ def alpha_core(theta, S, f, N, a0):
                               * torch.exp(-((N - h) ** 2) / (2 * SIGMA_N ** 2))
     return a0 * F_phi * F_vortex * F_369, F_phi, F_vortex, F_369
 
+
+def _bessel_jn(x, n):
+    """Bessel function J_n(x) for small integer order n, torch-native via the
+    j0/j1 upward recurrence  J_{k+1}(x) = (2k/x)·J_k(x) − J_{k-1}(x). Used for the
+    Toroidal state's J_h(k·R) wave-mode preservation (framework Eq 3, State 10)."""
+    x = x.clamp(min=1e-3)
+    j0 = torch.special.bessel_j0(x)
+    j1 = torch.special.bessel_j1(x)
+    if n == 0:
+        return j0
+    if n == 1:
+        return j1
+    jm, jc = j0, j1
+    for k in range(1, n):
+        jp = (2.0 * k / x) * jc - jm
+        jm, jc = jc, jp
+    return jc
+
 # ── State identifiers ────────────────────────────────────────────────────────
 S_CLASSICAL   = 0
 S_TOROIDAL    = 1
@@ -186,13 +204,15 @@ def state_modifier(state_id, theta, S, f, N, E, a0, ctx):
         return 0.95 * one
 
     if state_id == S_TOROIDAL:
-        # Closed-loop flow: reward oscillators whose state aligns with
-        # the collective flow direction (toroidal major axis).
-        flow_align = ctx.get('flow_align', None)
-        if isinstance(flow_align, torch.Tensor):
-            # Higher alignment with flow → higher modifier
-            return (0.9 + 0.2 * flow_align.clamp(0, 1)).clamp(0.9, 1.1)
-        return 1.0 * one
+        # α_toroidal ∝ (1 + κ Σ_{h∈{3,6,9}} J_h(k·R)) — Bessel wave modes that fit
+        # the closed-loop toroidal geometry (framework Eq 3, State 10). R = the
+        # oscillator's amplitude (loop radius), k = golden wavenumber φ. This is
+        # the state's real signature physics, now wired to the state (previously a
+        # generic linear flow-alignment reward).
+        R = E.clamp(min=1e-4).sqrt()
+        kR = PHI * R
+        bess = _bessel_jn(kR, 3) + _bessel_jn(kR, 6) + _bessel_jn(kR, 9)
+        return (1.0 + KAPPA * bess).clamp(0.85, 1.15)
 
     if state_id == S_HARMONIC:
         # Resonance quality factor Q. Oscillators near 3-6-9 harmonics
@@ -497,11 +517,17 @@ def alpha_for_state(state_id, theta, S, f, N, E, a0, ctx):
     core, F_phi, F_vortex, F_369 = alpha_core(theta, S, f, N, a0)
     mod = state_modifier(state_id, theta, S, f, N, E, a0, ctx)
     raw = core * mod
-    # Map into the state's α-range
-    lo, hi = ALPHA_RANGES.get(state_id, (0.7, 0.9))
-    # raw is typically in [0, ~1.2]. Normalize to [0,1] then scale to band.
-    quality = raw.clamp(0, 1.5) / 1.5   # normalized quality ∈ [0,1]
-    alpha = lo + (hi - lo) * quality
+    # Eq 3 AS WRITTEN: α = α_0·F_φ·F_vortex·F_369·modifier. The RESONANCE sets the
+    # retention magnitude — a well-aligned (golden angle + spiral + 3-6-9) node
+    # keeps its energy; a misaligned one decays. Previously `raw` was squashed
+    # into a fixed per-state ALPHA_RANGES band, which discarded the formula's
+    # magnitude and made retention a lookup table. That override is removed;
+    # clamp only for numerical stability. PHANTOM is the one regime allowed α>1
+    # (genuine energy gain, per the Preservation Hierarchy).
+    if state_id == S_PHANTOM:
+        alpha = raw.clamp(1.0, 1.15)
+    else:
+        alpha = raw.clamp(0.05, 0.999)
     return alpha, F_phi, F_vortex, F_369
 
 
@@ -1532,6 +1558,11 @@ class UERFDynamics:
             beta = 0.5  # Increased from 0.15: sensory input must be strong enough to steer dynamics
             sens_mag = drive_sens.norm(dim=-1)
             P_in = sens_mag ** 2
+            # Eq 1/4 USABLE energy: input couples through the RECEIVING node's
+            # golden/3-6-9 resonance (resonant absorption) — usable = raw × its
+            # alignment. α now encodes that resonance (Eq 3 fix), so gate the
+            # source by it, bounded [0.4,1.0] so non-resonant nodes still absorb.
+            P_in = P_in * (0.4 + 0.6 * alpha.clamp(0.0, 1.0))
 
             # TEACHING READOUT: Use ONLY sensory drive for teaching P_in.
             #
@@ -1587,12 +1618,20 @@ class UERFDynamics:
 
             sid_per_osc = self.state_id
             C_rows = self.C_states[sid_per_osc]
-            E_diff = mean_E_per_state.unsqueeze(0) - E.unsqueeze(-1)
+            # Ultimate Eq coupling: Σ_j C_ij·w_j·√(E_i·E_j)·cos(φ_ij). CONSTRUCTIVE
+            # geometric-mean product (non-negative amplitude), phase-gated — NOT
+            # a (E_j−E_i) diffusion. cos(φ_ij) sets constructive(+)/destructive(−);
+            # √(E_i·E_j) amplifies coupling when BOTH states carry energy.
+            E_geo = torch.sqrt(E.clamp(min=0).unsqueeze(-1)
+                               * mean_E_per_state.clamp(min=0).unsqueeze(0) + 1e-12)
             w_states = self.state_weights[:N_STATE_SLOTS].unsqueeze(0)
             # cos(φ_i − φ_j) = cosφ_i·cosφ_j + sinφ_i·sinφ_j  (circular-mean state phase)
             phase_factor = (cos_node.unsqueeze(-1) * mean_cos_state.unsqueeze(0)
                             + sin_node.unsqueeze(-1) * mean_sin_state.unsqueeze(0))
-            cross_flow = (C_rows * E_diff * w_states * phase_factor).sum(-1)
+            cross_flow = (C_rows * E_geo * w_states * phase_factor).sum(-1)
+            # bound the constructive coupling so it can't run away (|flow| ≤ ½E_i)
+            cap = 0.5 * E
+            cross_flow = torch.maximum(torch.minimum(cross_flow, cap), -cap)
             # Teaching slots don't participate in cross-state flow
             cross_flow = torch.where(teach_mask, torch.zeros_like(cross_flow), cross_flow)
 
@@ -1726,10 +1765,12 @@ class UERFDynamics:
             # Normalized divergence: positive = more outgoing
             div_norm = (out_flow - in_flow) / (out_flow + in_flow + 1.0).clamp(min=1.0)
             # EMA update: slow adaptation prevents momentary spikes from triggering PHANTOM
-            target_w = -1.0 - 0.3 * torch.tanh(div_norm * 2.0)  # range [-1.3, -0.7]
+            # base below −1 so a routed PHANTOM node actually sits in the w<−1
+            # energy-gain regime (previously base −1.0 kept most nodes at w>−1,
+            # collapsing the gain to ~1); allow down to −2.0 for strong divergence.
+            target_w = -1.15 - 0.45 * torch.tanh(div_norm * 2.0)  # range [-1.6, -0.7]
             self.local_w = 0.95 * self.local_w + 0.05 * target_w
-            # Clamp to prevent extreme values
-            self.local_w = self.local_w.clamp(-1.5, -0.7)
+            self.local_w = self.local_w.clamp(-2.0, -0.7)
 
             # Lorentz γ from full vector velocity
             if self._prev_s is not None:
@@ -2977,13 +3018,19 @@ class UERFExperience:
                 #  teach-bond accumulators)
 
     def predict(self):
-        """Read out teaching-slot magnitudes as class scores. The class whose
-        associative (sensor→teach) bonds the input evokes lights its slot the
-        brightest. Training-free; no labels, no fitted head, no calibration."""
+        """Read out class scores by the framework's Eq 6 VALENCE, not raw
+        magnitude:  V_k = ⟨s_k, R_k⟩ − λ‖s_k − I_k‖²  with reference R_k = identity
+        I_k = the slot's own c_k. Resonance with the class reference minus
+        deviation from it — a loud-but-misaligned slot (spurious cross-class
+        activation) is penalised, unlike plain magnitude. Training-free; no
+        labels, no fitted head, no calibration."""
         if self.t_start is None:
             return None
-        teach_s = self.s[self.t_start:self.t_end]
-        return teach_s.norm(dim=-1)
+        s = self.s[self.t_start:self.t_end]
+        c = self.c[self.t_start:self.t_end]
+        align = (s * c).sum(-1)            # ⟨s,R⟩ resonance with class reference
+        dev   = ((s - c) ** 2).sum(-1)     # ‖s−I‖² deviation from identity
+        return align - 0.25 * dev          # Eq 6 valence (λ=0.25, as valence())
 
     def predict_aware(self):
         """Self-aware readout: magnitude × holographic quality gate.
