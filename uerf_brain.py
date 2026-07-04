@@ -1599,6 +1599,24 @@ class UERFDynamics:
             # Eq 4: E[n+1] = α·E[n] + β·P_in + cross_flow
             E_next = alpha * E + beta * P_in + cross_flow
 
+            # ── COUPLING BRIDGE: class-slot competition (Eq-6 lateral inhibition)
+            # The class memories are stored DISJOINT (bonds never overwrite each
+            # other → retention). But at readout they must COMPARE: the slot that
+            # best resonates with the current field suppresses the others. This is
+            # the native, unsupervised counterpart of the whitened readout's class-
+            # decorrelation — competition in the field instead of a label-fitted
+            # transform. It makes the answer emerge from the class memories
+            # comparing notes, WITHOUT altering their stored bonds, so readout
+            # interference falls while stored-memory retention is untouched.
+            if self.t_start is not None and (self.t_end - self.t_start) > 1:
+                t0, t1 = self.t_start, self.t_end
+                Et = E_next[t0:t1]                                # (n_cls,) slot energies
+                n_other = max(t1 - t0 - 1, 1)
+                others = (Et.sum() - Et) / n_other               # mean energy of the OTHERS
+                kappa = 0.6                                      # competition strength
+                E_next = E_next.clone()
+                E_next[t0:t1] = (Et - kappa * others).clamp(min=0.0)
+
             # Vacuum zero-point floor
             vacuum_mask = (sid_per_osc == S_VACUUM)
             E_next = torch.where(vacuum_mask,
