@@ -1,0 +1,14 @@
+{
+  "id": "blackloko/uerf-lifetime-full-all-phases-aware-readout",
+  "title": "UERF Lifetime Full All Phases Aware Readout",
+  "code_file": "uerf_lifetime_full_aware.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}

@@ -1,0 +1,14 @@
+{
+  "id": "blackloko/uerf-retina",
+  "title": "UERF Retina",
+  "code_file": "uerf_retina.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}

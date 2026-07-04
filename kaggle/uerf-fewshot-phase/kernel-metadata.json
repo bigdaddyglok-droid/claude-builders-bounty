@@ -1,0 +1,14 @@
+{
+  "id": "blackloko/uerf-fewshot-phase",
+  "title": "UERF Fewshot Phase",
+  "code_file": "uerf_fewshot_phase.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}

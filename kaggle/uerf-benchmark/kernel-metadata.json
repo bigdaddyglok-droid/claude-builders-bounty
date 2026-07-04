@@ -1,0 +1,16 @@
+{
+  "id": "blackloko/uerf-benchmark-mnist-suite",
+  "title": "UERF Benchmark MNIST Suite",
+  "code_file": "uerf_benchmark.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": [
+    "blackloko/uerf-train-mnist-from-scratch-uerf-train-py"
+  ]
+}

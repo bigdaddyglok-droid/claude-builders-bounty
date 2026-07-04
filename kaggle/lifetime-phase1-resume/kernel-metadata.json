@@ -1,0 +1,16 @@
+{
+  "id": "blackloko/uerf-phase-1-mnist-resume-step-6000-gpu",
+  "title": "UERF Phase 1 MNIST \u2014 Resume step 6000 (GPU)",
+  "code_file": "uerf_phase1_resume.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [
+    "blackloko/uerf-phase1-ckpt-step6000"
+  ],
+  "competition_sources": [],
+  "kernel_sources": []
+}

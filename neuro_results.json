@@ -1,0 +1,72 @@
+{
+  "neuro_off": {
+    "neuro_enabled": false,
+    "n_train_steps": 0,
+    "acc_before": 53.1,
+    "acc_after": 53.1,
+    "neuro_levels_final": {
+      "ach": 1.0,
+      "da": 1.0,
+      "na": 1.0,
+      "sero": 1.0
+    },
+    "neuro_trace": [],
+    "da_when_wrong_mean": null,
+    "da_when_right_mean": null,
+    "n_wrong": 0,
+    "n_right": 0
+  },
+  "neuro_on_train": {
+    "neuro_enabled": true,
+    "n_train_steps": 1000,
+    "acc_before": 53.1,
+    "acc_after": 52.9,
+    "neuro_levels_final": {
+      "ach": 0.9001,
+      "da": 0.8546,
+      "na": 0.9952,
+      "sero": 1.1232
+    },
+    "neuro_trace": [
+      {
+        "step": 200,
+        "ach": 0.5818,
+        "da": 1.1512,
+        "na": 1.0084,
+        "sero": 1.0931
+      },
+      {
+        "step": 400,
+        "ach": 0.8403,
+        "da": 1.1548,
+        "na": 1.0011,
+        "sero": 1.1003
+      },
+      {
+        "step": 600,
+        "ach": 0.8585,
+        "da": 0.8537,
+        "na": 1.0017,
+        "sero": 1.1075
+      },
+      {
+        "step": 800,
+        "ach": 0.8446,
+        "da": 1.1537,
+        "na": 0.9845,
+        "sero": 1.1224
+      },
+      {
+        "step": 1000,
+        "ach": 0.9001,
+        "da": 0.8546,
+        "na": 0.9952,
+        "sero": 1.1232
+      }
+    ],
+    "da_when_wrong_mean": 1.1501,
+    "da_when_right_mean": 0.8502,
+    "n_wrong": 762,
+    "n_right": 238
+  }
+}

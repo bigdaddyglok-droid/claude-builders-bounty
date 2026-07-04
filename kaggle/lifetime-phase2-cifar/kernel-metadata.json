@@ -1,0 +1,16 @@
+{
+  "id": "blackloko/uerf-phase-2-cifar-100-gpu",
+  "title": "UERF Phase 2 CIFAR 100 GPU",
+  "code_file": "uerf_phase2_cifar.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [
+    "blackloko/uerf-phase1-complete-ckpt"
+  ],
+  "competition_sources": [],
+  "kernel_sources": []
+}

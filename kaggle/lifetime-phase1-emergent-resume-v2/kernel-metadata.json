@@ -1,0 +1,16 @@
+{
+  "id": "blackloko/uerf-phase-1-emergent-resume-v2-gpu",
+  "title": "UERF Phase 1 Emergent Resume V2 GPU",
+  "code_file": "uerf_phase1_emergent_resume_v2.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [
+    "blackloko/uerf-phase1-emergent-ckpt-step8000"
+  ],
+  "competition_sources": [],
+  "kernel_sources": []
+}

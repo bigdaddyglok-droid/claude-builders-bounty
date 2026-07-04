@@ -1,0 +1,3401 @@
+"""
+UERF BRAIN — Framework-Faithful Implementation
+====================================================================
+Patent pending #63/940,078 — Black
+
+18 physical states are defined (S_CLASSICAL=0 … S_CONSCIOUSNESS=17): the 14
+canonical UERF regimes, plus HoloAdS (AdS-boundary variant of Holographic) and
+3 speculative extensions (Consciousness, Multiversal, Retrocausal).
+CANDIDATE_STATES routes oscillators through 17 of them. Per-state α-ranges
+match the framework document exactly.
+
+THE CONTRACT (what makes this faithful, not decorative)
+-------------------------------------------------------
+  • Per oscillator: a d-dim state vector s.
+        E = ||s||²              ← energy (the 6 equations govern this)
+        s / ||s||               ← direction (carries the pattern/cognition)
+    Physics drives magnitude. Direction carries the payload.
+
+  • Eq 2/4 (Feedback / Master Discrete) govern E[n+1] = α·E + β·P_in + cross_flow.
+  • Eq 3 (Preservation Factor α) = the universal core
+        α₀·exp(-|θ-θ_g|/σ_θ)·exp(-(S-S_φ)²/2σ_S²)·(1+κ·Σ_{3,6,9})
+    times a per-state modifier (state_modifier), clamped to the state's α-range.
+  • Eq 5 (Master Continuous) dissipation = Λ₀·M_state / (F_φ·F_vortex·F_369),
+    where M_state is the per-state loss law (state_dissipation_modifier):
+    Holographic exp(−S_ent)≈0, Thermal exp(E_a/kT), Harmonic Q-factor,
+    Phantom |1+w|, Fractal λ^D_f, Relativistic 1/γ, …
+  • Eq 6 (Valence) V(s) = α⟨s,R⟩ − λ‖s−I‖² — the per-state routing objective.
+  • Routing between states is emergent: oscillators sample their state by
+    valence (Eq 6), and the exploration temperature self-anneals from the
+    field's OWN valence decisiveness — as the field grows confident the sampling
+    collapses to argmax valence. No fixed schedule drives the anneal.
+
+STATE → NEURAL FUNCTION
+  Classical    baseline interior processing           (α 0.70–0.90)
+  CubitClassic discrete-space baseline                (α 0.90–0.96)
+  Quantum      superposition (parallel representations)(α 0.94–0.98)
+  Qubit        discrete superposition                 (α 0.97–0.995)
+  Phantom      growth regions (energy gain, α>1)      (α 1.00–1.05)
+  Temporal     maturation (preservation earned by time)(α 0.80–0.93)
+  Relativistic time-dilation (protects fast-changing) (α 0.85–0.94)
+  Harmonic     pattern matching / resonance           (α 0.93–0.98)
+  Vacuum       stable standby reservoir               (α 0.96–0.99)
+  Fractal      multi-scale coupling                   (α 0.95–0.99)
+  Retrocausal  predictive future-feedback             (α 0.94–0.98)
+  Elemental    coupled-force gating                   (α 0.88–0.95)
+  Holographic  long-term memory (near-perfect hold)   (α 0.98–0.998)
+  HoloAdS      AdS/CFT boundary compression           (α 0.98–0.998)
+  Thermal      entropy / exploration (annealing)      (α 0.75–0.92)
+  Multiversal  parallel hypotheses                    (α 0.94–0.98)
+  Toroidal     input / closed-loop flow               (α 0.92–0.97)
+  Consciousness attention / salience gate             (α 0.90–0.96)
+"""
+import os, math, time, json
+from typing import Optional, Tuple, List
+import numpy as np
+import torch
+import torch.nn.functional as F
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONSTANTS — golden anchors from the framework
+# ═══════════════════════════════════════════════════════════════════════════════
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+PHI       = 1.6180339887498948482          # golden ratio  (S_φ)
+PHI_INV   = 0.6180339887498948482
+THETA_G   = 2.3999632297286533             # golden angle (radians) ≈ 137.5°
+S_PHI     = PHI                            # scale anchor (document's S_φ)
+SIGMA_TH  = 0.55                           # σ_θ
+SIGMA_S   = 0.55                           # σ_S
+SIGMA_F   = 0.55                           # σ_f
+SIGMA_N   = 2.1                            # σ_N
+KAPPA     = 0.15                           # κ  (3-6-9 coupling)
+HARM      = (3.0, 6.0, 9.0)               # the 3-6-9 family
+F0        = 6.0                            # f_0 reference (mid of 3-6-9)
+LAMBDA0   = 1.0                            # Λ_0 base dissipation (Eq 5)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Eq 3 — PRESERVATION FACTOR.  Universal core + per-state modifier.
+# ═══════════════════════════════════════════════════════════════════════════════
+def alpha_core(theta, S, f, N, a0):
+    """The state-agnostic core of Eq 3 — identical across every state; the
+    per-state modifier and α-band are what differentiate the regimes."""
+    F_phi    = torch.exp(-torch.abs(theta - THETA_G) / SIGMA_TH)
+    F_vortex = torch.exp(-((S - S_PHI) ** 2) / (2 * SIGMA_S ** 2))
+    F_369 = torch.ones_like(theta)
+    for h in HARM:
+        F_369 = F_369 + KAPPA * torch.exp(-(((f / F0) - h) ** 2) / (2 * SIGMA_F ** 2)) \
+                              * torch.exp(-((N - h) ** 2) / (2 * SIGMA_N ** 2))
+    return a0 * F_phi * F_vortex * F_369, F_phi, F_vortex, F_369
+
+
+def _bessel_jn(x, n):
+    """Bessel function J_n(x) for small integer order n, torch-native via the
+    j0/j1 upward recurrence  J_{k+1}(x) = (2k/x)·J_k(x) − J_{k-1}(x). Used for the
+    Toroidal state's J_h(k·R) wave-mode preservation (framework Eq 3, State 10)."""
+    x = x.clamp(min=1e-3)
+    j0 = torch.special.bessel_j0(x)
+    j1 = torch.special.bessel_j1(x)
+    if n == 0:
+        return j0
+    if n == 1:
+        return j1
+    jm, jc = j0, j1
+    for k in range(1, n):
+        jp = (2.0 * k / x) * jc - jm
+        jm, jc = jc, jp
+    return jc
+
+# ── State identifiers ────────────────────────────────────────────────────────
+S_CLASSICAL   = 0
+S_TOROIDAL    = 1
+S_CUBIT       = 2
+S_QUANTUM     = 3
+S_QUBIT       = 4
+S_PHANTOM     = 5
+S_TEMPORAL    = 6
+S_RELATIVISTIC= 7
+S_HARMONIC    = 8
+S_VACUUM      = 9
+S_FRACTAL     = 10
+S_RETROCAUSAL = 11
+S_ELEMENTAL   = 12
+S_HOLOGRAPHIC = 13
+S_HOLOADS     = 14
+S_THERMAL     = 15
+S_MULTIVERSAL = 16
+S_CONSCIOUSNESS = 17
+
+# Width of per-state arrays (state_weights, mean_E_per_state, C_states rows).
+# Must be strictly greater than the largest state id above (currently 17).
+# Using a named constant instead of a bare literal 20 sprinkled through the
+# code so that adding a state can't silently cause an out-of-bounds write —
+# bump this in ONE place. (20 leaves headroom for two more states.)
+N_STATE_SLOTS = 20
+assert N_STATE_SLOTS > S_CONSCIOUSNESS, "N_STATE_SLOTS must exceed max state id"
+
+STATE_NAMES = {
+    S_CLASSICAL: 'CLASSICAL', S_TOROIDAL: 'TOROIDAL', S_CUBIT: 'CUBIT',
+    S_QUANTUM: 'QUANTUM', S_QUBIT: 'QUBIT', S_PHANTOM: 'PHANTOM',
+    S_TEMPORAL: 'TEMPORAL', S_RELATIVISTIC: 'RELATIVISTIC',
+    S_HARMONIC: 'HARMONIC', S_VACUUM: 'VACUUM', S_FRACTAL: 'FRACTAL',
+    S_RETROCAUSAL: 'RETROCAUSAL', S_ELEMENTAL: 'ELEMENTAL',
+    S_HOLOGRAPHIC: 'HOLOGRAPHIC', S_HOLOADS: 'HOLOADS',
+    S_THERMAL: 'THERMAL', S_MULTIVERSAL: 'MULTIVERSAL',
+    S_CONSCIOUSNESS: 'CONSCIOUSNESS',
+}
+
+# α-range per state from the document's Preservation Factor Hierarchy
+ALPHA_RANGES = {
+    S_CLASSICAL:    (0.70, 0.90),
+    S_TOROIDAL:     (0.92, 0.97),
+    S_CUBIT:        (0.90, 0.96),
+    S_QUANTUM:      (0.94, 0.98),
+    S_QUBIT:        (0.97, 0.995),
+    S_PHANTOM:      (1.00, 1.05),
+    S_TEMPORAL:     (0.80, 0.93),
+    S_RELATIVISTIC: (0.85, 0.94),
+    S_HARMONIC:     (0.93, 0.98),
+    S_VACUUM:       (0.96, 0.99),
+    S_FRACTAL:      (0.95, 0.99),
+    S_RETROCAUSAL:  (0.94, 0.98),
+    S_ELEMENTAL:    (0.88, 0.95),
+    S_HOLOGRAPHIC:  (0.98, 0.998),
+    S_HOLOADS:      (0.98, 0.998),
+    S_THERMAL:      (0.75, 0.92),
+    S_MULTIVERSAL:  (0.94, 0.98),
+    S_CONSCIOUSNESS:(0.90, 0.96),
+}
+
+# Graded-consolidation tunables (vacuum forget/recall memory model)
+PRESERVE_FLOOR   = 0.25     # below this a consolidated memory is released to vacuum
+PRESERVE_RENEW   = 0.10     # how fast use pulls preservation back toward 1.0
+PRESERVE_DECAY   = 0.002    # per-experience disuse fade of preservation
+RECALL_RESONANCE = 0.5      # cue/identity alignment needed to recall a vacuum node
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PER-STATE MODIFIERS — each returns a (n,) tensor that scales alpha_core
+# into the state's specific physical regime.
+# ═══════════════════════════════════════════════════════════════════════════════
+def state_modifier(state_id, theta, S, f, N, E, a0, ctx):
+    """
+    Per-state modifier for Eq 3. Returns (n,) tensor ∈ (0, ~1.6].
+    Each state has a UNIQUE physical computation that distinguishes it
+    from Classical — not just a constant scale factor.
+    """
+    one = torch.ones_like(theta)
+
+    if state_id == S_CLASSICAL:
+        return one
+
+    if state_id == S_THERMAL:
+        # Boltzmann factor: exp(-E/kT). High T → modifier→1 (exploration).
+        # Low T → modifier drops (exploitation). T from ctx.
+        T = ctx.get('T', None)
+        if isinstance(T, torch.Tensor):
+            return torch.exp(-E / (T.clamp(min=0.1) * 3.0)).clamp(0.5, 1.2)
+        return 0.9 * one
+
+    if state_id == S_RELATIVISTIC:
+        # Time dilation: 1/γ = √(1-v²/c²). High velocity → lower modifier
+        # (slower subjective time = higher effective preservation).
+        v2c2 = ctx.get('v2c2', None)
+        if isinstance(v2c2, torch.Tensor):
+            return torch.sqrt(1.0 - v2c2.clamp(0, 0.95)).clamp(0.7, 1.1)
+        return 0.95 * one
+
+    if state_id == S_TOROIDAL:
+        # α_toroidal ∝ (1 + κ Σ_{h∈{3,6,9}} J_h(k·R)) — Bessel wave modes that fit
+        # the closed-loop toroidal geometry (framework Eq 3, State 10). R = the
+        # oscillator's amplitude (loop radius), k = golden wavenumber φ. This is
+        # the state's real signature physics, now wired to the state (previously a
+        # generic linear flow-alignment reward).
+        R = E.clamp(min=1e-4).sqrt()
+        kR = PHI * R
+        bess = _bessel_jn(kR, 3) + _bessel_jn(kR, 6) + _bessel_jn(kR, 9)
+        return (1.0 + KAPPA * bess).clamp(0.85, 1.15)
+
+    if state_id == S_HARMONIC:
+        # Resonance quality factor Q. Oscillators near 3-6-9 harmonics
+        # get high Q → high modifier. This is DISTINCT from Classical
+        # because it specifically rewards harmonic frequency matching.
+        nearest = torch.stack([(f - h).abs() for h in HARM], 0).min(0).values
+        Q = 1.0 / (0.15 + nearest)
+        return (0.85 + 0.25 * Q / (Q + 1.0)).clamp(0.85, 1.15)
+
+    if state_id == S_MULTIVERSAL:
+        # Parallel-branch reinforcement. Best branch alignment → modifier.
+        branch_gain = ctx.get('branch_gain', None)
+        if isinstance(branch_gain, torch.Tensor):
+            return branch_gain.clamp(0.9, 1.1)
+        return torch.full_like(theta, ctx.get('branch_gain', 1.02)).clamp(0.9, 1.1)
+
+    if state_id == S_RETROCAUSAL:
+        # Reward oscillators whose past prediction was CORRECT about current state.
+        pred_accuracy = ctx.get('pred_accuracy', None)
+        if isinstance(pred_accuracy, torch.Tensor):
+            # pred_accuracy ∈ [0,1]: 1 = perfect prediction of current state
+            return (0.9 + 0.15 * pred_accuracy).clamp(0.9, 1.05)
+        pc = ctx.get('pred_consistency', 0.5)
+        return torch.full_like(theta, 0.9 + 0.1 * pc).clamp(0.9, 1.05)
+
+    if state_id == S_FRACTAL:
+        # Multi-scale coherence: reward oscillators whose state is consistent
+        # across multiple timescales (fractal self-similarity).
+        scale_coherence = ctx.get('scale_coherence', None)
+        if isinstance(scale_coherence, torch.Tensor):
+            return (0.9 + 0.15 * scale_coherence).clamp(0.9, 1.1)
+        return 1.03 * one
+
+    if state_id == S_VACUUM:
+        # Zero-point stability: reward LOW-activity oscillators (reservoirs).
+        # Vacuum state is for stable, quiet oscillators that preserve energy.
+        vacuum_stability = ctx.get('vacuum_stability', None)
+        if isinstance(vacuum_stability, torch.Tensor):
+            return (0.9 + 0.15 * vacuum_stability).clamp(0.9, 1.1)
+        return 1.02 * one
+
+    if state_id == S_HOLOGRAPHIC:
+        # Information preservation via boundary encoding, WITH a real capacity
+        # cap. holo_fidelity is boundary OCCUPANCY (state energy lying in the
+        # rank-d/3 boundary subspace, ÷ the area fraction). The reward is an
+        # inverted-U that peaks at full occupancy (=1) and DECLINES past it: a
+        # node trying to pack more than the boundary can hold is penalized, so it
+        # sheds the excess into other states. This enforces the holographic
+        # bound rather than rewarding unbounded projection.
+        holo_fidelity = ctx.get('holo_fidelity', None)
+        if isinstance(holo_fidelity, torch.Tensor):
+            over = (holo_fidelity - 1.0).abs()          # distance from capacity
+            return (1.1 - 0.15 * over).clamp(0.95, 1.1)
+        # No projector ⇒ no boundary subspace exists, so there is nothing to cap
+        # against; fall back to a neutral, in-band reward (no unbounded growth).
+        sent = ctx.get('S_ent', 1.0)
+        return (torch.exp(torch.tensor(0.02 * sent, device=theta.device)) * one).clamp(0.95, 1.1)
+
+    if state_id == S_HOLOADS:
+        # AdS/CFT boundary COMPRESSION — distinct from Holographic. Where
+        # Holographic uses a symmetric inverted-U that penalises over-packing,
+        # HoloAdS rewards monotone bulk→boundary compression: a node whose state
+        # compresses cleanly onto the boundary is rewarded with saturating gain
+        # (tanh), approaching but never exceeding the holographic bound. No
+        # penalty below the bound — compression is always favourable — which is
+        # what separates the AdS-boundary regime from the capacity-capped one.
+        holo_fidelity = ctx.get('holo_fidelity', None)
+        if isinstance(holo_fidelity, torch.Tensor):
+            return (0.95 + 0.15 * torch.tanh(holo_fidelity)).clamp(0.95, 1.1)
+        return 1.02 * one
+
+    if state_id == S_PHANTOM:
+        # exp(w * ln(a)) where w < -1 → α > 1 (energy GAIN).
+        # local_w is now properly dynamic: more negative when divergence is high.
+        w = ctx.get('w', None)
+        if isinstance(w, torch.Tensor):
+            # w is in [-2.0, -1.0] range. For a_core ~ 0.85-0.95:
+            # 0.9^(-1.5) = 1.17, 0.9^(-2.0) = 1.23
+            # We compute the modifier as a_core^(-(|w|-1)) which gives > 1
+            gain_exponent = (torch.abs(w) - 1.0).clamp(min=0.0, max=1.0)
+            # Use a0 as base (typically 0.85-0.95)
+            mod = torch.pow(1.0 / a0.clamp(min=0.8), gain_exponent)
+            return mod.clamp(1.0, 1.15)
+        return 1.05 * one
+
+    if state_id == S_QUANTUM:
+        # Quantum coherence: reward oscillators with high phase coherence
+        # relative to their neighbors (entanglement proxy).
+        phase_coherence = ctx.get('phase_coherence', None)
+        if isinstance(phase_coherence, torch.Tensor):
+            kappa = 0.15
+            return (1.0 + kappa * phase_coherence).clamp(0.9, 1.15)
+        # Fallback: frequency-based coherence
+        kappa = 0.1
+        Phi_sum = torch.zeros_like(one)
+        for h in (3.0, 6.0, 9.0):
+            Phi_h = torch.exp(-((f - h) ** 2) / 1.0) * torch.tanh(N / 5.0)
+            Phi_sum = Phi_sum + Phi_h
+        return (1.0 + kappa * Phi_sum).clamp(0.9, 1.15)
+
+    if state_id == S_QUBIT:
+        # Discrete quantum: Lorentzian peaks at harmonics (level transitions)
+        kappa = 0.15
+        P_sum = torch.zeros_like(one)
+        gamma_w = 0.5
+        for h in (3.0, 6.0, 9.0):
+            P_h = (gamma_w ** 2) / ((f - h) ** 2 + gamma_w ** 2)
+            P_h = P_h * torch.tanh(N / 5.0)
+            P_sum = P_sum + P_h
+        return (1.0 + kappa * P_sum).clamp(0.9, 1.15)
+
+    if state_id == S_CONSCIOUSNESS:
+        # Observer-coupled: attention-gated measurement
+        A = ctx.get('A', 0.5)
+        if not isinstance(A, torch.Tensor):
+            A = torch.tensor(A, device=theta.device)
+        E_max = E.max().clamp(min=1e-6)
+        I_ratio = E / E_max
+        observer_factor = torch.exp(-I_ratio * 0.5)
+        psi_collapse = 4.0 * I_ratio * (1.0 - I_ratio)
+        kappa = 0.1
+        return (observer_factor * (1.0 + kappa * psi_collapse * A)).clamp(0.8, 1.1)
+
+    if state_id == S_TEMPORAL:
+        # Relaxation envelope: monotonic in proper_time
+        t_norm = ctx.get('t_norm', None)
+        if isinstance(t_norm, torch.Tensor):
+            return (0.85 + 0.2 * (1.0 - torch.exp(-t_norm / 0.3))).clamp(0.85, 1.1)
+        t_val = ctx.get('t_norm', 0.5)
+        return (0.85 + 0.2 * (1.0 - math.exp(-t_val / 0.3))) * one
+
+    if state_id == S_CUBIT:
+        # Discrete-space: lattice alignment bonus
+        lattice_align = ctx.get('lattice_align', None)
+        if isinstance(lattice_align, torch.Tensor):
+            return (0.9 + 0.15 * lattice_align).clamp(0.9, 1.1)
+        return 1.0 * one
+
+    if state_id == S_ELEMENTAL:
+        # Coupled-force gating: reward when multiple force channels align
+        force_coupling = ctx.get('force_coupling', None)
+        if isinstance(force_coupling, torch.Tensor):
+            return (0.85 + 0.2 * force_coupling).clamp(0.85, 1.1)
+        return 0.97 * one
+
+    return one
+
+
+def state_dissipation_modifier(state_id, theta, S, f, N, E, a0,
+                               local_T=None, gamma=None, local_w=None,
+                               vacuum_energy=None, scale_mem_coh=None,
+                               proper_time_norm=None, holo_fidelity=None,
+                               phase_coh=None, pred_acc=None, branch_gain=None,
+                               force_coupling=None, lattice_align=None,
+                               is_locked=None):
+    """
+    Per-state Eq 5 (Master Continuous) dissipation modifier, vectorized.
+
+    Base (Classical) dissipation rate is Λ₀/(F_φ·F_vortex·F_369). This returns
+    the per-oscillator multiplier M(state) on that base rate, one branch per
+    regime, taken from each state's framework Eq 5 loss term. M<1 preserves
+    better (slower decay); M>1 dissipates faster. Returns (n,) in (0.01, 3.0].
+    """
+    n = state_id.shape[0]
+    dev = state_id.device
+    M = torch.ones(n, device=dev)
+
+    # Thermal — Arrhenius/Boltzmann loss exp(E_a/(k_B·T)): dissipation is HUGE
+    # when cold (T→0 ⇒ exp→∞) and falls toward the base rate when hot. High T
+    # is the exploration/barrier-crossing regime (low loss, search); cooling
+    # forces settling (high loss). Activation energy E_a normalized to ~1.
+    if local_T is not None:
+        T = local_T.clamp(min=0.05, max=3.0)
+        m_thermal = torch.exp(1.0 / T - 1.0).clamp(0.6, 3.0)
+        M = torch.where(state_id == S_THERMAL, m_thermal, M)
+
+    # Harmonic — Q replaces F_vortex: Λ₀/(F_φ·Q·F_369). Near 3-6-9 (measured as
+    # f/F0, consistent with alpha_core) Q is high → low loss (resonant ringing).
+    nearest = torch.stack([((f / F0) - h).abs() for h in HARM], 0).min(0).values
+    Q = 1.0 / (0.15 + nearest)
+    m_harm = (1.0 / Q.clamp(min=1e-3)).clamp(0.1, 2.0)
+    M = torch.where(state_id == S_HARMONIC, m_harm, M)
+
+    # Vacuum — 1/(1+Λ·R²) suppression; vacuum_energy stands in for the Λ·R²
+    # reservoir term. Larger reservoir → smaller loss.
+    if vacuum_energy is not None:
+        m_vac = (1.0 / (1.0 + 2.0 * vacuum_energy.clamp(min=0.0))).clamp(0.3, 1.0)
+        M = torch.where(state_id == S_VACUUM, m_vac, M)
+
+    # Toroidal — R_minor/R_major closed-loop ratio (<1). Approximated by the
+    # canonical torus aspect ratio; no per-oscillator poloidal/toroidal split.
+    M = torch.where(state_id == S_TOROIDAL, torch.full((n,), 0.7, device=dev), M)
+
+    # Relativistic — 1/γ time dilation (√(-g) reduced to scalar γ). Fast-changing
+    # oscillators have high γ, so their loss per network tick is suppressed.
+    if gamma is not None:
+        m_rel = (1.0 / gamma.clamp(min=1.0)).clamp(0.3, 1.0)
+        M = torch.where(state_id == S_RELATIVISTIC, m_rel, M)
+
+    # Holographic / HoloAdS — exp(−S_ent/k_B): entanglement entropy drives the
+    # loss to near zero. This is the long-term-memory mechanism. Boundary
+    # fidelity is the entanglement proxy (high fidelity ⇒ high S_ent ⇒ ~0 loss).
+    if holo_fidelity is not None:
+        S_ent = 2.0 + 3.0 * holo_fidelity.clamp(0, 1)
+        m_holo = torch.exp(-S_ent).clamp(0.01, 0.5)
+    else:
+        m_holo = torch.full((n,), 0.05, device=dev)
+    M = torch.where(state_id == S_HOLOGRAPHIC, m_holo, M)
+    M = torch.where(state_id == S_HOLOADS, m_holo, M)
+
+    # Phantom — |1+w| with w<-1: the loss term shrinks to near zero (the only
+    # gain regime). Energy gain itself is applied through α∈[1.00,1.05] in Eq 4.
+    if local_w is not None:
+        m_phan = torch.abs(1.0 + local_w).clamp(0.0, 0.5)
+    else:
+        m_phan = torch.full((n,), 0.1, device=dev)
+    M = torch.where(state_id == S_PHANTOM, m_phan, M)
+
+    # Fractal — λ^{D_f} with golden scaling λ=1/φ and D_f∈[1,2] from cross-scale
+    # coherence. Multi-scale redundancy makes loss sub-Classical.
+    if scale_mem_coh is not None:
+        D_f = 1.0 + scale_mem_coh.clamp(0, 1)
+        m_frac = ((1.0 / PHI) ** D_f).clamp(0.3, 0.9)
+    else:
+        m_frac = torch.full((n,), 0.6, device=dev)
+    M = torch.where(state_id == S_FRACTAL, m_frac, M)
+
+    # Quantum / Qubit — Lindblad decoherence: the dissipator γ_b0 is suppressed
+    # by coherence. High phase coherence ⇒ low loss (a coherent superposition
+    # resists information loss). Coherence-driven, not a flat constant. Qubit
+    # gets an extra discreteness factor (discrete levels prune leakage paths).
+    if phase_coh is not None:
+        coh = phase_coh.clamp(0, 1)
+        m_quant = (1.0 - 0.6 * coh).clamp(0.3, 1.0)
+        M = torch.where(state_id == S_QUANTUM, m_quant, M)
+        M = torch.where(state_id == S_QUBIT, (m_quant * 0.9).clamp(0.25, 1.0), M)
+    else:
+        M = torch.where(state_id == S_QUANTUM, torch.full((n,), 0.6, device=dev), M)
+        M = torch.where(state_id == S_QUBIT, torch.full((n,), 0.5, device=dev), M)
+
+    # Temporal — (1−exp(−t/τ_relax)) relaxes loss downward with time-in-state:
+    # recently-routed oscillators dissipate near base rate; persistent ones
+    # earn lower loss (maturation).
+    if proper_time_norm is not None:
+        m_temp = (1.0 - 0.5 * (1.0 - torch.exp(-proper_time_norm.clamp(min=0)))).clamp(0.5, 1.0)
+        M = torch.where(state_id == S_TEMPORAL, m_temp, M)
+
+    # Cubit — discrete space prunes loss paths: Λ₀·(1−ρ_discrete)/(…), where the
+    # lattice alignment is how well the state sits on a discrete cell. Strong
+    # lattice alignment ⇒ fewer leakage channels ⇒ lower loss than Classical.
+    if lattice_align is not None:
+        m_cubit = (1.0 - 0.35 * lattice_align.clamp(0, 1)).clamp(0.6, 1.0)
+        M = torch.where(state_id == S_CUBIT, m_cubit, M)
+    else:
+        M = torch.where(state_id == S_CUBIT, torch.full((n,), 0.85, device=dev), M)
+
+    # Elemental — Σ_i Λ_i·α_i(Q²): summed loss over the four force channels. When
+    # the channels are well-coupled (all aligned) the effective loss drops; the
+    # geometric-mean coupling stands in for the running-coupling product.
+    if force_coupling is not None:
+        m_elem = (1.0 - 0.3 * force_coupling.clamp(0, 1)).clamp(0.6, 1.1)
+        M = torch.where(state_id == S_ELEMENTAL, m_elem, M)
+    else:
+        M = torch.where(state_id == S_ELEMENTAL, torch.full((n,), 0.95, device=dev), M)
+
+    # Multiversal — cross-branch transfer Σ_j T_ij²·(…): a branch coupled to many
+    # good parallel branches loses less (redundancy across worlds). branch_gain
+    # is the best-branch alignment proxy for the tunneling coupling.
+    if branch_gain is not None:
+        m_multi = (1.0 - 0.25 * (branch_gain.clamp(0.9, 1.1) - 0.9) / 0.2).clamp(0.7, 1.0)
+        M = torch.where(state_id == S_MULTIVERSAL, m_multi, M)
+    else:
+        M = torch.where(state_id == S_MULTIVERSAL, torch.full((n,), 0.9, device=dev), M)
+
+    # Retrocausal — future-kernel ∫K_retro·E(t')dt', approximated causally by
+    # prediction accuracy: an oscillator whose prediction proved correct is on a
+    # stable predicted trajectory and dissipates less.
+    if pred_acc is not None:
+        m_retro = (1.0 - 0.3 * pred_acc.clamp(0, 1)).clamp(0.6, 1.0)
+        M = torch.where(state_id == S_RETROCAUSAL, m_retro, M)
+    else:
+        M = torch.where(state_id == S_RETROCAUSAL, torch.full((n,), 0.9, device=dev), M)
+
+    # Consciousness — exp(I_obs/I_max) attention gate: attended oscillators (high
+    # observer information) dissipate less. A(t) here is a global proxy, so this
+    # is a coarse salience gate rather than per-oscillator attention.
+    M = torch.where(state_id == S_CONSCIOUSNESS, torch.full((n,), 0.9, device=dev), M)
+
+    # Locked reference nodes are consolidated boundary memory — force the
+    # holographic near-zero loss regardless of routed state.
+    if is_locked is not None:
+        M = torch.where(is_locked, torch.full((n,), 0.02, device=dev), M)
+
+    return M.clamp(0.01, 3.0)
+
+
+def alpha_for_state(state_id, theta, S, f, N, E, a0, ctx):
+    """
+    Full Eq 3 for a given state.
+    Core × modifier, mapped into the state's hierarchy band.
+    """
+    core, F_phi, F_vortex, F_369 = alpha_core(theta, S, f, N, a0)
+    mod = state_modifier(state_id, theta, S, f, N, E, a0, ctx)
+    raw = core * mod
+    # Eq 3 AS WRITTEN: α = α_0·F_φ·F_vortex·F_369·modifier. The RESONANCE sets the
+    # retention magnitude — a well-aligned (golden angle + spiral + 3-6-9) node
+    # keeps its energy; a misaligned one decays. Previously `raw` was squashed
+    # into a fixed per-state ALPHA_RANGES band, which discarded the formula's
+    # magnitude and made retention a lookup table. That override is removed;
+    # clamp only for numerical stability. PHANTOM is the one regime allowed α>1
+    # (genuine energy gain, per the Preservation Hierarchy).
+    if state_id == S_PHANTOM:
+        alpha = raw.clamp(1.0, 1.15)
+    else:
+        alpha = raw.clamp(0.05, 0.999)
+    return alpha, F_phi, F_vortex, F_369
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Eq 6 — VALENCE (the objective the field maximizes)
+# ═══════════════════════════════════════════════════════════════════════════════
+def valence(s, R, I, alpha, lam=0.25):
+    """V(s) = α⟨s,R⟩ − λ‖s−I‖²"""
+    align = (s * R).sum(-1)
+    dev = ((s - I) ** 2).sum(-1)
+    return alpha * align - lam * dev
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SENSORY PROJECTION — fixed random projection from raw input to d-dim
+# ═══════════════════════════════════════════════════════════════════════════════
+class SensoryProjection:
+    """Fixed random projection from raw input space to n_sensory dimensions.
+
+    Optional mean-subtraction (mean_raw): the raw input has a large DC component
+    (e.g. the "average digit" ink mass) that is shared across every class. Left
+    in, it dominates the projected vector, so every class's stored readout
+    template is 80-97% common-mode and the densest classes win the argmax for
+    nearly all inputs. Subtracting a FROZEN dataset mean image before projection
+    removes that common-mode at the source — standard mean-subtraction, no
+    labels — so the readout is discriminative by construction with no eval-time
+    correction. The reference is frozen (not a drifting running mean) so a
+    class's bonds are centred against the same reference at train and eval time
+    across all later phases (preserves the zero-forgetting guarantee)."""
+    def __init__(self, raw_dim, n_sensory, seed=42, mean_raw=None,
+                 online=False, ema=0.02):
+        rng = torch.Generator().manual_seed(seed)
+        self.W = torch.randn(raw_dim, n_sensory, generator=rng) / math.sqrt(raw_dim)
+        self.n_sensory = n_sensory
+        self.mean_raw = mean_raw if mean_raw is None else mean_raw.reshape(-1)
+        # ONLINE centering: the brain estimates the DC (common-mode) itself from
+        # the stream — no offline dataset mean. This is honest sensory adaptation
+        # (retinal/cortical gain control removes the DC), computed from what the
+        # brain has actually seen, not a precomputed dataset statistic.
+        self.online = online
+        self._ema = ema
+        self._run_mean = None
+
+    def __call__(self, x):
+        """Project raw input x (raw_dim,) → (n_sensory,) normalized."""
+        x = x.to(self.W.device)
+        if self.online:
+            if self._run_mean is None:
+                self._run_mean = x.clone()
+            centered = x - self._run_mean
+            self._run_mean = (1 - self._ema) * self._run_mean + self._ema * x   # toward raw x
+            x = centered
+        elif self.mean_raw is not None:
+            x = x - self.mean_raw
+        out = x @ self.W
+        return out / out.norm().clamp(min=1e-6)
+
+    def to(self, device):
+        """Move projection matrix to specified device."""
+        self.W = self.W.to(device)
+        if self.mean_raw is not None:
+            self.mean_raw = self.mean_raw.to(device)
+        if self._run_mean is not None:
+            self._run_mean = self._run_mean.to(device)
+        return self
+
+
+class HarmonicRetina:
+    """Physics-legal front-end built from the framework's OWN math — no random
+    weights, no learned parameters, no pretrained anything.
+
+    The image is projected onto 2D Bessel standing-wave modes J_h(k·R)·e^{ihφ}
+    (State 10 TOROIDAL: "1 + κ Σ_{h∈{3,6,9}} J_h(k·R)") at the h∈{3,6,9}
+    super-resonance harmonics (State 8 HARMONIC: "f/f_0 = 3,6,9 → superresonance"),
+    placed at a grid of LOCAL centres across fractal scales k = k0·λ^s (State 11
+    FRACTAL: "self-similarity across scales, λ^{-D_f·k}"). Each mode's response is
+    read by MAGNITUDE |⟨x, mode⟩| — a circular-harmonic power that is tolerant to
+    translation (Fourier shift theorem) and in-patch rotation. So the field
+    receives the image's geometry — edges, loops, curvature, at position and
+    scale — instead of random pixel soup. This is the retina the framework
+    specifies; it replaces SensoryProjection's random W with the doc's physics."""
+    def __init__(self, img_hw=28, harmonics=(3, 6, 9), n_scales=2, lam=1.618,
+                 centers_per_side=3, patch_frac=0.6, mean_raw=None):
+        import numpy as np
+        from scipy.special import jv
+        H = img_hw
+        ys, xs = np.mgrid[0:H, 0:H].astype(np.float32)
+        cs = np.linspace(H * 0.25, H * 0.75, centers_per_side)
+        patch_sigma = patch_frac * (H / centers_per_side)
+        k0 = math.pi / (H * 0.5)                 # ~one wavelength across half-image
+        cols_r, cols_i = [], []
+        for s in range(n_scales):
+            k = k0 * (lam ** s)
+            for cy in cs:
+                for cx in cs:
+                    dx, dy = xs - cx, ys - cy
+                    R = np.sqrt(dx * dx + dy * dy)
+                    phi = np.arctan2(dy, dx)
+                    win = np.exp(-(R ** 2) / (2 * patch_sigma ** 2))   # local window
+                    for h in harmonics:
+                        radial = jv(h, k * R)
+                        cols_r.append((radial * np.cos(h * phi) * win).ravel())
+                        cols_i.append((radial * np.sin(h * phi) * win).ravel())
+        Wr = np.stack(cols_r, 1)
+        Wi = np.stack(cols_i, 1)
+        nrm = np.sqrt((Wr ** 2 + Wi ** 2).sum(0, keepdims=True))
+        nrm[nrm < 1e-8] = 1.0
+        self.Wr = torch.tensor(Wr / nrm, dtype=torch.float32)
+        self.Wi = torch.tensor(Wi / nrm, dtype=torch.float32)
+        self.n_sensory = self.Wr.shape[1]
+        self.mean_raw = mean_raw if mean_raw is None else mean_raw.reshape(-1)
+
+    def __call__(self, x):
+        """Raw image x (H*H,) → (n_sensory,) circular-harmonic magnitude features."""
+        x = x.to(self.Wr.device)
+        if self.mean_raw is not None:
+            x = x - self.mean_raw
+        re = x @ self.Wr
+        im = x @ self.Wi
+        feat = torch.sqrt(re * re + im * im)     # |response| — shift/rotation tolerant
+        return feat / feat.norm().clamp(min=1e-6)
+
+    def to(self, device):
+        self.Wr = self.Wr.to(device)
+        self.Wi = self.Wi.to(device)
+        if self.mean_raw is not None:
+            self.mean_raw = self.mean_raw.to(device)
+        return self
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# UTILITY
+# ═══════════════════════════════════════════════════════════════════════════════
+def spread_directions(n, d, device, seed=0):
+    """Generate n well-spread unit vectors in d dimensions."""
+    g = torch.Generator(device='cpu').manual_seed(seed)
+    v = torch.randn(n, d, generator=g, device='cpu').to(device)
+    # Gram-Schmidt-ish orthogonalization for small n
+    if n <= d:
+        Q, _ = torch.linalg.qr(v.T)
+        return Q.T[:n]
+    return v / v.norm(dim=1, keepdim=True).clamp(min=1e-8)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PART 2 — FIELD SUBSTRATE
+# ═══════════════════════════════════════════════════════════════════════════════
+class UERFField:
+    """
+    The brain: a field of n_max coupled oscillators, each with d-dim state.
+    Implements all 6 equations from the UERF framework.
+    """
+    # States that participate in routing competition (all 18, including
+    # S_CONSCIOUSNESS — the observer-coupled attention gate).
+    CANDIDATE_STATES = [
+        S_CLASSICAL, S_TOROIDAL, S_CUBIT, S_QUANTUM, S_QUBIT,
+        S_PHANTOM, S_TEMPORAL, S_RELATIVISTIC, S_HARMONIC,
+        S_VACUUM, S_FRACTAL, S_RETROCAUSAL, S_ELEMENTAL,
+        S_HOLOGRAPHIC, S_HOLOADS, S_THERMAL, S_MULTIVERSAL,
+        S_CONSCIOUSNESS,
+    ]
+
+    def __init__(self, n_max=200, n_initial=100, d=32, input_dim=None,
+                 n_classes=None, device=None):
+        dev = device or DEVICE
+        self.device = dev
+        self.n_max = n_max
+        n_initial = min(n_initial, n_max)  # Safety: can't init more than capacity
+        self.d = d
+        self.input_dim = input_dim
+        self.n_classes = n_classes
+        self.experience_count = 0
+        self.births = 0
+        self.deaths = 0
+        self.crystallization_events = 0
+
+        # ── Identity parameters (per oscillator)
+        self.theta = torch.randn(n_max, device=dev) * 0.8 + THETA_G
+        self.S     = torch.randn(n_max, device=dev) * 0.5 + S_PHI
+        self.f     = torch.rand(n_max, device=dev) * 8.0 + 1.0
+        self.N     = torch.rand(n_max, device=dev) * 8.0 + 1.0
+        self.a0    = torch.rand(n_max, device=dev) * 0.15 + 0.85
+        self.age   = torch.zeros(n_max, device=dev)
+        self.alive_mask = torch.zeros(n_max, dtype=torch.bool, device=dev)
+        self.alive_mask[:n_initial] = True
+
+        # ── d-dim state vectors
+        self.s = torch.zeros(n_max, d, device=dev)
+        # Imaginary part of the complex amplitude ψ = s + i·s_imag. Only
+        # oscillators in the QUANTUM/QUBIT states carry a non-zero imaginary
+        # component (genuine superposition); everyone else stays purely real.
+        self.s_imag = torch.zeros(n_max, d, device=dev)
+        cr = torch.randn(n_max, d, device=dev)
+        self.c = cr / cr.norm(dim=1, keepdim=True).clamp(min=1e-8)
+
+        # ── Phase (Kuramoto)
+        ph = torch.rand(n_max, device=dev) * 2 * math.pi
+        self.phase_vec = torch.stack([torch.cos(ph), torch.sin(ph)], 1)
+
+        # ── Emergent state assignment
+        self.state_id = torch.full((n_max,), S_CLASSICAL, dtype=torch.long, device=dev)
+
+        # ── Bond tensor C[i,j] is (d,d) matrix for each pair
+        self.C = torch.zeros(n_max, n_max, d, d, device=dev)
+        self.C_mask = torch.zeros(n_max, n_max, dtype=torch.bool, device=dev)
+
+        # ── FIX 11: Self-interactions (autapses) per Paper [3]
+        # Initialize diagonal bonds with small identity-like matrices
+        # This reshapes the energy landscape to confine dynamics to stored patterns
+        for i in range(n_initial):
+            self.C[i, i] = torch.eye(d, device=dev) * 0.05
+
+        # ── Slot tags
+        self._is_sensory  = torch.zeros(n_max, dtype=torch.bool, device=dev)
+        self._is_teaching = torch.zeros(n_max, dtype=torch.bool, device=dev)
+        self.t_start = self.t_end = None
+
+        if input_dim is not None:
+            self.theta[:input_dim] = THETA_G
+            self.S[:input_dim]     = S_PHI
+            self.f[:input_dim]     = 6.0
+            self.N[:input_dim]     = torch.arange(input_dim, device=dev).float() % 9 + 1
+            self.a0[:input_dim]    = 0.99
+            self.age[:input_dim]   = 1e9
+            self.alive_mask[:input_dim] = True
+            self._is_sensory[:input_dim] = True
+            self.c[:input_dim] = spread_directions(input_dim, d, dev, 0)
+
+        if n_classes is not None and input_dim is not None:
+            t0, t1 = input_dim, input_dim + n_classes
+            self.theta[t0:t1] = THETA_G
+            self.S[t0:t1]     = S_PHI
+            self.f[t0:t1]     = 6.0
+            self.N[t0:t1]     = torch.arange(n_classes, device=dev).float() % 9 + 1
+            self.a0[t0:t1]    = 0.99
+            self.age[t0:t1]   = 1e9
+            self.alive_mask[t0:t1] = True
+            self._is_teaching[t0:t1] = True
+            self.c[t0:t1] = spread_directions(n_classes, d, dev, 1000)
+            self.t_start, self.t_end = t0, t1
+
+            # ── HOLOGRAPHIC BOUNDARY PROJECTOR
+            with torch.no_grad():
+                d_boundary = max(2, min(n_classes, d // 3))
+                _, _, Vt = torch.linalg.svd(self.c[t0:t1], full_matrices=False)
+                B = Vt[:d_boundary].T
+                self._holo_projector = (B @ B.T).to(dev)
+                self._holo_area_limit = float(d_boundary) / float(d)
+        else:
+            self._holo_projector = None
+            self._holo_area_limit = 1.0
+
+        # ── State-specific auxiliary variables
+        self.proper_time = torch.zeros(n_max, device=dev)
+        self.gamma = torch.ones(n_max, device=dev)
+        self.local_T = torch.ones(n_max, device=dev) * 0.5
+        self.local_v2c2 = torch.zeros(n_max, device=dev)
+        self.local_w = torch.full((n_max,), -1.0, device=dev)  # Neutral: PHANTOM only for genuinely divergent
+        self.vacuum_energy = torch.ones(n_max, device=dev) * 0.1
+        self.force_channels = torch.zeros(n_max, 4, device=dev)
+        self.future_prediction = torch.zeros(n_max, d, device=dev)
+        self._prev_prediction = torch.zeros(n_max, d, device=dev)
+        self.scale_memory = torch.zeros(n_max, 4, d, device=dev)
+        self.s_branches = torch.randn(n_max, 4, d, device=dev) * 0.01
+        self.branch_weights = torch.ones(n_max, 4, device=dev) * 0.25
+        self._E_history = torch.zeros(n_max, 8, device=dev)
+        self._prev_s = None
+        self._prev_mag = None
+
+        # ── Cross-state coupling matrix (for Unified Master Equation)
+        n_states = N_STATE_SLOTS
+        self.C_states = torch.eye(n_states, device=dev) * 0.0
+        # Neighboring states couple weakly
+        for i in range(n_states - 1):
+            self.C_states[i, i+1] = 0.02
+            self.C_states[i+1, i] = 0.02
+        # Strong couplings between complementary states
+        self.C_states[S_PHANTOM, S_HOLOGRAPHIC] = 0.05
+        self.C_states[S_HOLOGRAPHIC, S_PHANTOM] = 0.05
+        self.C_states[S_THERMAL, S_VACUUM] = 0.03
+        self.C_states[S_VACUUM, S_THERMAL] = 0.03
+
+        self.state_weights = torch.ones(n_states, device=dev) / n_states
+
+        # ── Replay/rehearsal has been removed entirely. The brain defends
+        # memory with physics alone (crystallization + locking + disjoint
+        # per-class teach-bond accumulators) — no stored training examples,
+        # no rehearsal.
+
+        self._last_birth_step = -1000
+
+        # ── Per-class teaching bond TRUE-MEAN accumulators
+        # Stores Σ outer(c_teach, s_sensor) per class; final bond = sum/count.
+        # Phase B class learning NEVER touches Phase A class accumulators
+        # because the active-class check is per-experience.
+        self._teach_bond_sum = (torch.zeros(n_classes, n_max, d, d, device=dev)
+                                if n_classes else None)
+        self._teach_bond_count = torch.zeros(n_classes if n_classes else 10, device=dev)
+        # Concept-relation web (understanding): symmetric graph of how strongly
+        # each concept co-activates with each other in the brain's perception.
+        self._concept_bonds = (torch.zeros(n_classes, n_classes, device=dev)
+                               if n_classes else None)
+
+        # ── Class consolidation locks (DeepSeek #3 + framework crystallization)
+        # _class_locked[i] = True → osc i frozen as part of a consolidated
+        # class representation. Locked osc: no decay, no competitive drift,
+        # bonds protected from pruning, high budget.
+        self._class_locked = torch.zeros(n_max, dtype=torch.bool, device=dev)
+        # Map: which class each locked oscillator belongs to (−1 if not locked)
+        self._locked_class = torch.full((n_max,), -1, dtype=torch.long, device=dev)
+        # Graded preservation strength of a consolidated node (1 = fresh/sticky).
+        # Renews toward 1 when the node is used (its cue recurs) and fades slowly
+        # with disuse. A locked node is hard-frozen only while preservation is
+        # high; once it fades below PRESERVE_FLOOR the memory is released to the
+        # VACUUM reservoir (forgotten-but-recoverable) instead of staying frozen
+        # forever. This makes consolidation reversible, like real memory.
+        self._preservation = torch.ones(n_max, device=dev)
+        # Emergent-category bookkeeping: how many category slots have been born
+        # (0 until the first birth_category; unused by fixed-category brains).
+        self._active_categories = 0
+
+        # ── Novelty tracking
+        self._input_running_mean = None
+        self._input_running_var = torch.tensor(1.0, device=dev)
+
+        # ── FIX 3: Crystallization requires sustained high valence
+        self._valence_accumulator = torch.zeros(n_max, device=dev)
+        self._valence_count = torch.zeros(n_max, device=dev)
+        self._crystallization_threshold = 0.6  # must sustain valence > this
+
+        # ── Neuromodulation (all 1.0 = identity; enabled by default)
+        self.neuro_enabled = True
+        self._neuro = {'ach': 1.0, 'da': 1.0, 'na': 1.0, 'sero': 1.0}
+        self._mean_valence_prev = 0.0
+        # per-input surprise = current deviation² / typical deviation (1.0=typical)
+        self._input_surprise = 1.0
+        # 1.0=brain was correct before teaching, 0.0=wrong, 0.5=unknown/no label
+        self._prediction_correct = 0.5
+
+    # ── Helpers ──
+    def energy(self):
+        return (self.s ** 2).sum(-1)
+
+    def state_magnitude(self):
+        return self.s.norm(dim=-1)
+
+    def phase_angle(self):
+        return torch.atan2(self.phase_vec[:, 1], self.phase_vec[:, 0])
+
+    def eq5_decay_factor(self, dt=0.08, exponent_cap=0.5, ctx=None,
+                         precomputed=None):
+        """
+        Eq 5 (Master Continuous) dissipation as a per-tick decay factor,
+        state-specific.
+
+            dE/dt = P_in − (Λ₀·M_state / (F_φ·F_vortex·F_369))·E
+
+        M_state is the per-regime modifier (state_dissipation_modifier). The
+        homogeneous solution over one tick is E·exp(−rate·dt); since the field
+        scales s (E=‖s‖²) the factor on s is the sqrt. exponent_cap bounds
+        single-tick loss (P_in balances it in the full equation). To avoid
+        recomputing F_φ·F_vortex·F_369 every call, the dynamics loop may pass
+        `precomputed=(F_phi,F_vortex,F_369)` from its routing pass. Returns an
+        (n,) factor in (0, 1].
+        """
+        if precomputed is not None:
+            F_phi, F_vortex, F_369 = precomputed
+        else:
+            _, F_phi, F_vortex, F_369 = alpha_core(
+                self.theta, self.S, self.f, self.N, self.a0)
+        denom = (F_phi * F_vortex * F_369).clamp(min=1e-3)
+
+        g = ctx if isinstance(ctx, dict) else {}
+
+        def _t(key):
+            v = g.get(key, None)
+            return v if isinstance(v, torch.Tensor) else None
+
+        M_state = state_dissipation_modifier(
+            self.state_id, self.theta, self.S, self.f, self.N, self.energy(),
+            self.a0,
+            local_T=self.local_T, gamma=self.gamma, local_w=self.local_w,
+            vacuum_energy=self.vacuum_energy,
+            scale_mem_coh=_t('scale_coherence'),
+            proper_time_norm=_t('t_norm'),
+            holo_fidelity=_t('holo_fidelity'),
+            phase_coh=_t('phase_coherence'),
+            pred_acc=_t('pred_accuracy'),
+            branch_gain=_t('branch_gain'),
+            force_coupling=_t('force_coupling'),
+            lattice_align=_t('lattice_align'),
+            is_locked=self._class_locked,
+        )
+
+        exponent = (LAMBDA0 * M_state * dt / denom).clamp(max=exponent_cap)
+        _sero = self._neuro.get('sero', 1.0)
+        exponent = exponent / _sero  # sero>1 → less dissipation → longer memory; 1.0=identity
+        return torch.sqrt(torch.exp(-exponent))
+
+    def crystallized(self):
+        """
+        FIX 3: Crystallization requires BOTH golden-ratio proximity AND
+        sustained high valence (accumulated over time). This prevents
+        premature crystallization from identity drift alone.
+        """
+        golden_proximity = (
+            (torch.abs(self.theta - THETA_G) < 0.10) &
+            (torch.abs(self.S - S_PHI) < 0.10)
+        )
+        # Must have accumulated sufficient positive valence
+        mean_valence = self._valence_accumulator / self._valence_count.clamp(min=1)
+        _ach = self._neuro.get('ach', 1.0)
+        _sero = self._neuro.get('sero', 1.0)
+        _thresh = max(0.3, min(0.85, self._crystallization_threshold * _ach / _sero))
+        valence_sufficient = mean_valence > _thresh  # ach/sero=1.0 → thresh=0.6 (identity)
+        return golden_proximity & valence_sufficient & self.alive_mask
+
+    def report(self):
+        alive = self.alive_mask
+        interior = alive & ~self._is_sensory & ~self._is_teaching
+        cr = self.crystallized()
+        dist = {}
+        for sid in self.CANDIDATE_STATES:
+            c_ = int(((self.state_id == sid) & interior).sum())
+            if c_ > 0:
+                dist[STATE_NAMES.get(sid, f'S{sid}')] = c_
+        return {
+            'alive': int(alive.sum()),
+            'interior': int(interior.sum()),
+            'crystallized': int(cr.sum()),
+            'crystallization_events': self.crystallization_events,
+            'births': self.births,
+            'deaths': self.deaths,
+            'bonds': int(self.C_mask.sum()),
+            'mean_E': float(self.energy()[alive].mean()) if alive.any() else 0.0,
+            'global_order': float((self.s[alive].mean(0)).norm()) if alive.any() else 0.0,
+            'experience_count': self.experience_count,
+            'state_dist': dist,
+            'd': self.d,
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PART 3 — DYNAMICS + EMERGENT STATE ROUTING
+# ═══════════════════════════════════════════════════════════════════════════════
+class UERFDynamics:
+    """Mixin: dynamics methods for UERFField."""
+
+    def _build_routing_ctx(self):
+        """
+        Build the context dict with per-oscillator physics tensors for routing.
+        FIX 4: Each state gets genuinely distinct input signals so they can
+        differentiate themselves in the routing competition.
+        """
+        s = self.s
+        mag = self.state_magnitude()
+        n = self.n_max
+        d = self.d
+        ctx = {}
+
+        # Thermal: local temperature (energy variance)
+        ctx['T'] = self.local_T
+
+        # Relativistic: velocity squared
+        ctx['v2c2'] = self.local_v2c2
+
+        # Phantom: divergence-driven w
+        ctx['w'] = self.local_w
+
+        # Temporal: normalized proper time
+        pt_max = self.proper_time.max().clamp(min=1.0)
+        ctx['t_norm'] = self.proper_time / pt_max
+
+        # Toroidal: flow alignment (how much each osc aligns with collective)
+        interior = self.alive_mask & ~self._is_sensory & ~self._is_teaching
+        if interior.any() and mag[interior].sum() > 0:
+            flow_dir = s[interior].sum(0)
+            flow_norm = flow_dir.norm().clamp(min=1e-8)
+            flow_dir = flow_dir / flow_norm
+            flow_align = (s * flow_dir.unsqueeze(0)).sum(-1) / mag.clamp(min=1e-8)
+            ctx['flow_align'] = flow_align.clamp(-1, 1)
+        else:
+            ctx['flow_align'] = torch.zeros(n, device=self.device)
+
+        # Harmonic: already uses f directly in modifier
+
+        # Holographic OCCUPANCY, used to enforce a real capacity cap. The
+        # holographic principle bounds boundary-encoded information by the
+        # boundary's fractional dimension (_holo_area_limit = d_boundary/d).
+        # occupancy = (share of state energy in the boundary subspace) ÷ area
+        # fraction. We deliberately let occupancy EXCEED 1 (clamped to [0,2]) so
+        # the Holographic reward's inverted-U can penalize over-packing — a node
+        # that exceeds capacity is pushed to shed the excess. (The dissipation
+        # path re-clamps to [0,1] internally, so long-term-memory low-loss is
+        # unaffected; only the routing reward sees the over-capacity signal.)
+        if self._holo_projector is not None:
+            s_proj = s @ self._holo_projector
+            proj_fidelity = (s * s_proj).sum(-1) / (mag ** 2).clamp(min=1e-8)
+            area_limit = getattr(self, '_holo_area_limit', 1.0)
+            if area_limit and area_limit > 0:
+                proj_fidelity = (proj_fidelity / area_limit)
+            ctx['holo_fidelity'] = proj_fidelity.clamp(0, 2.0)
+        else:
+            ctx['holo_fidelity'] = torch.zeros(n, device=self.device)
+
+        # Retrocausal: FIX 2 — prediction ACCURACY (not self-correlation)
+        # How well did our PREVIOUS prediction match CURRENT state?
+        if self._prev_prediction is not None:
+            pred_norm = self._prev_prediction.norm(dim=-1).clamp(min=1e-8)
+            s_norm = mag.clamp(min=1e-8)
+            # Cosine similarity between prediction and actual
+            cos_sim = (self._prev_prediction * s).sum(-1) / (pred_norm * s_norm)
+            # Subtract baseline (mean similarity) to remove bias
+            baseline = cos_sim[self.alive_mask].mean() if self.alive_mask.any() else 0.0
+            ctx['pred_accuracy'] = (cos_sim - baseline).clamp(0, 1)
+        else:
+            ctx['pred_accuracy'] = torch.zeros(n, device=self.device)
+
+        # Fractal: multi-scale coherence
+        if self.scale_memory.abs().sum() > 0:
+            # How consistent is current state across timescales?
+            coherences = []
+            for k in range(1, 4):
+                sm_k = self.scale_memory[:, k]
+                sm_norm = sm_k.norm(dim=-1).clamp(min=1e-8)
+                cos_k = (s * sm_k).sum(-1) / (mag.clamp(min=1e-8) * sm_norm)
+                coherences.append(cos_k)
+            scale_coh = torch.stack(coherences, dim=-1).mean(dim=-1)
+            ctx['scale_coherence'] = scale_coh.clamp(0, 1)
+        else:
+            ctx['scale_coherence'] = torch.zeros(n, device=self.device)
+
+        # Vacuum: stability (inverse of recent change)
+        if self._prev_s is not None:
+            change = (s - self._prev_s).norm(dim=-1)
+            stability = torch.exp(-change * 5.0)  # high when stable
+            ctx['vacuum_stability'] = stability
+        else:
+            ctx['vacuum_stability'] = torch.ones(n, device=self.device) * 0.5
+
+        # Quantum: phase coherence with neighbors
+        phi = self.phase_angle()
+        if self.C_mask.any():
+            # Mean phase difference with bonded neighbors
+            phase_diff = torch.cos(phi.unsqueeze(0) - phi.unsqueeze(1))
+            bonded_coherence = (phase_diff * self.C_mask.float()).sum(1)
+            n_bonds = self.C_mask.float().sum(1).clamp(min=1)
+            ctx['phase_coherence'] = (bonded_coherence / n_bonds).clamp(0, 1)
+        else:
+            ctx['phase_coherence'] = torch.zeros(n, device=self.device)
+
+        # Multiversal: best branch alignment
+        if self.s_branches.abs().sum() > 0:
+            # Which branch best predicts current state?
+            branch_aligns = torch.zeros(n, 4, device=self.device)
+            for j in range(4):
+                sb = self.s_branches[:, j]
+                sb_norm = sb.norm(dim=-1).clamp(min=1e-8)
+                branch_aligns[:, j] = (sb * s).sum(-1) / (sb_norm * mag.clamp(min=1e-8))
+            best_branch = branch_aligns.max(dim=-1).values
+            ctx['branch_gain'] = (0.95 + 0.1 * best_branch).clamp(0.9, 1.1)
+        else:
+            ctx['branch_gain'] = torch.ones(n, device=self.device)
+
+        # Cubit: lattice alignment
+        k_lattice = 4
+        n_c = torch.floor(mag * k_lattice).clamp(0, k_lattice - 1).long()
+        idx = torch.arange(d, device=self.device).unsqueeze(0)
+        roll_idx = (idx - n_c.unsqueeze(-1)) % d
+        R_cubit = torch.gather(self.c, 1, roll_idx)
+        lattice_align = (s * R_cubit).sum(-1) / mag.clamp(min=1e-8)
+        ctx['lattice_align'] = lattice_align.clamp(0, 1)
+
+        # Elemental: force channel coupling
+        if self.force_channels.abs().sum() > 0:
+            # Product of normalized force couplings (high when all forces align)
+            fc_norm = self.force_channels / self.force_channels.max(dim=0).values.clamp(min=1e-8)
+            coupling = fc_norm.prod(dim=-1) ** 0.25  # geometric mean
+            ctx['force_coupling'] = coupling.clamp(0, 1)
+        else:
+            ctx['force_coupling'] = torch.zeros(n, device=self.device)
+
+        # Consciousness: attention proxy
+        active_frac = (mag > 0.1).float().mean()
+        ctx['A'] = active_frac
+
+        return ctx
+
+    def _route_states(self, ctx):
+        """
+        EMERGENT ROUTING by VALENCE (Eq 6) with STOCHASTIC ASSIGNMENT.
+        
+        The key insight: when oscillator magnitudes are small (early training),
+        valence differences between states are tiny. Pure argmax collapses
+        everything to one state. Instead, we use STOCHASTIC routing:
+        - Each oscillator samples its state from the softmax distribution
+        - This ensures state DIVERSITY while still respecting valence ordering
+        - As training progresses and magnitudes grow, the distribution sharpens
+          naturally (larger magnitudes → larger valence differences → more
+          deterministic routing) — the physics self-anneals.
+        
+        Additionally, each state computes a DISTINCT fitness signal that uses
+        per-oscillator properties (frequency, phase, connectivity) so that
+        different oscillators genuinely prefer different states.
+        """
+        interior = self.alive_mask & ~self._is_sensory & ~self._is_teaching
+        # CRITICAL: locked oscillators MUST keep their assigned HOLOGRAPHIC state.
+        # If they're routed normally, the very next experience() call will
+        # reassign them based on whatever signal is loudest, erasing the
+        # consolidation. Exclude them from routing entirely — they stay
+        # frozen in whatever state consolidate_class put them in.
+        routable = interior & ~self._class_locked
+        n = self.n_max
+        d = self.d
+        s = self.s
+        c = self.c
+        mag = self.state_magnitude()
+        lam = 0.25
+
+        if not interior.any():
+            return s, torch.zeros(n, device=self.device)
+
+        n_int = int(interior.sum())
+
+        # Build full context if not provided
+        if ctx is None or len(ctx) == 0:
+            ctx = self._build_routing_ctx()
+
+        # Compute FITNESS for each candidate state.
+        # Fitness = α_state * state_specific_signal - lam * deviation
+        # Each state uses a UNIQUE signal derived from oscillator properties.
+        n_states = len(self.CANDIDATE_STATES)
+        fitness = torch.zeros(n, n_states, device=self.device)
+
+        # Base alignment (shared)
+        base_align = (s * c).sum(-1)  # ⟨s, c⟩
+        I_k = c * mag.unsqueeze(-1)
+        base_dev = ((s - I_k) ** 2).sum(-1)
+
+        for k, sid in enumerate(self.CANDIDATE_STATES):
+            alpha_k, _, _, _ = alpha_for_state(
+                sid, self.theta, self.S, self.f, self.N,
+                self.energy(), self.a0, ctx
+            )
+
+            # STATE-SPECIFIC FITNESS SIGNALS
+            # Each state has a unique criterion that makes it prefer
+            # certain oscillators over others.
+            if sid == S_CLASSICAL:
+                # Classical: baseline, no bonus
+                signal = base_align
+                dev = base_dev
+
+            elif sid == S_HOLOGRAPHIC and self._holo_projector is not None:
+                # Holographic: boundary projection fidelity (raw projected energy)
+                s_proj = s @ self._holo_projector
+                signal = (s * s_proj).sum(-1)
+                dev = ((s - s_proj) ** 2).sum(-1)
+
+            elif sid == S_HOLOADS and self._holo_projector is not None:
+                # HoloAdS: boundary COMPRESSION ratio — the FRACTION of the
+                # node's energy that lies on the boundary, ‖P·s‖²/‖s‖². Distinct
+                # from Holographic's unnormalized projection: it favours nodes
+                # that compress cleanly (high boundary fraction) regardless of
+                # absolute magnitude.
+                s_proj = s @ self._holo_projector
+                proj_energy = (s * s_proj).sum(-1)
+                tot_energy = (s * s).sum(-1).clamp(min=1e-6)
+                signal = base_align * (proj_energy / tot_energy).clamp(0.0, 1.0)
+                dev = base_dev
+
+            elif sid == S_CONSCIOUSNESS:
+                # Consciousness: observer-coupled attention/salience gate. A node
+                # is "attended" when its energy sits in the measurement-sensitive
+                # mid-range (maximal superposition), peaking at I_ratio=0.5 via
+                # psi = 4·I·(1−I) — the same observer-collapse term the modifier
+                # uses, so routing and α agree.
+                E_local = self.energy()
+                I_ratio = (E_local / E_local.max().clamp(min=1e-6))
+                psi = 4.0 * I_ratio * (1.0 - I_ratio)
+                signal = base_align * (1.0 + 0.5 * psi)
+                dev = base_dev
+
+            elif sid == S_TOROIDAL:
+                # Toroidal: flow alignment (collective direction)
+                flow_align = ctx.get('flow_align', torch.zeros(n, device=self.device))
+                signal = base_align + 0.5 * flow_align * mag
+                dev = base_dev
+
+            elif sid == S_HARMONIC:
+                # Harmonic: frequency proximity to 3-6-9
+                freq_bonus = torch.zeros(n, device=self.device)
+                for h in HARM:
+                    freq_bonus += torch.exp(-((self.f - h) ** 2) / 1.5)
+                signal = base_align * (1.0 + 0.5 * freq_bonus)
+                dev = base_dev
+
+            elif sid == S_FRACTAL:
+                # Fractal: multi-scale coherence
+                scale_coh = ctx.get('scale_coherence', torch.zeros(n, device=self.device))
+                signal = base_align * (1.0 + 0.5 * scale_coh)
+                dev = base_dev
+
+            elif sid == S_RETROCAUSAL:
+                # Retrocausal: prediction accuracy
+                pred_acc = ctx.get('pred_accuracy', torch.zeros(n, device=self.device))
+                signal = base_align + 0.5 * pred_acc * mag
+                dev = base_dev
+
+            elif sid == S_VACUUM:
+                # Vacuum: zero-point reservoir for stable resonators.
+                # CRITICAL: must require GENUINE alignment, not just stillness.
+                # Without this floor, decay_factor (0.85) creates "quiet" osc
+                # that have small change → high stability → routes to VACUUM,
+                # which has highest α (0.99) → preserves more energy → stays
+                # quiet → routing collapses to all-VACUUM. The base_align
+                # floor breaks the runaway.
+                stability = ctx.get('vacuum_stability', torch.ones(n, device=self.device) * 0.5)
+                # Only reward stability if the osc is genuinely active
+                # (base_align > floor). Otherwise treat as classical.
+                vacuum_reward = torch.where(
+                    base_align > 0.1,
+                    base_align * (1.0 + 0.3 * stability),   # genuine vacuum: reward
+                    base_align * 0.5,                        # quiescence: penalize
+                )
+                signal = vacuum_reward
+                dev = base_dev
+
+            elif sid == S_THERMAL:
+                # Thermal: high local temperature (high energy variance)
+                T = ctx.get('T', torch.ones(n, device=self.device) * 0.5)
+                T_norm = T / T.max().clamp(min=1e-6)
+                signal = base_align * (1.0 + 0.5 * T_norm)
+                dev = base_dev
+
+            elif sid == S_PHANTOM:
+                # Phantom: divergence (more outgoing than incoming bonds)
+                w = ctx.get('w', torch.full((n,), -1.0, device=self.device))
+                # Only strongly divergent oscillators (w < -1.3) get phantom affinity
+                phantom_affinity = (torch.abs(w) - 1.3).clamp(0, 0.5)
+                signal = base_align * (1.0 + 0.3 * phantom_affinity)
+                dev = base_dev
+
+            elif sid == S_RELATIVISTIC:
+                # Relativistic: high velocity (large recent state change)
+                v2c2 = ctx.get('v2c2', torch.zeros(n, device=self.device))
+                signal = base_align * (1.0 + 0.5 * v2c2)
+                dev = base_dev
+
+            elif sid == S_QUANTUM:
+                # Quantum: phase coherence with neighbors
+                phase_coh = ctx.get('phase_coherence', torch.zeros(n, device=self.device))
+                signal = base_align * (1.0 + 0.5 * phase_coh)
+                dev = base_dev
+
+            elif sid == S_MULTIVERSAL:
+                # Multiversal: branch diversity (best branch alignment)
+                branch_gain = ctx.get('branch_gain', torch.ones(n, device=self.device))
+                signal = base_align * branch_gain
+                dev = base_dev
+
+            elif sid == S_ELEMENTAL:
+                # Elemental: force coupling strength
+                force_coup = ctx.get('force_coupling', torch.zeros(n, device=self.device))
+                signal = base_align * (1.0 + 0.5 * force_coup)
+                dev = base_dev
+
+            elif sid == S_TEMPORAL:
+                # Temporal: proper time accumulation
+                t_norm = ctx.get('t_norm', torch.zeros(n, device=self.device))
+                if not isinstance(t_norm, torch.Tensor):
+                    t_norm = torch.full((n,), t_norm, device=self.device)
+                signal = base_align * (1.0 + 0.3 * t_norm)
+                dev = base_dev
+
+            elif sid == S_CUBIT:
+                # Cubit: lattice alignment
+                lattice = ctx.get('lattice_align', torch.zeros(n, device=self.device))
+                signal = base_align * (1.0 + 0.5 * lattice)
+                dev = base_dev
+
+            else:
+                signal = base_align
+                dev = base_dev
+
+            fitness[:, k] = alpha_k * signal - lam * dev
+
+        # Normalize fitness relative to Classical
+        cls_idx = self.CANDIDATE_STATES.index(S_CLASSICAL)
+        V_classical = fitness[:, cls_idx].unsqueeze(-1)
+        delta_V = fitness - V_classical
+        delta_V[:, cls_idx] = 0.0
+
+        # POPULATION-BALANCE PENALTY: prevent one state from monopolizing
+        # the field. Without this, VACUUM (highest α at 0.99) becomes a
+        # runaway sink — once 20% of osc are quiet enough to be VACUUM,
+        # they get α=0.99 boost, stay quiet, get more "stability" reward,
+        # and the population collapses to all-VACUUM by step 200.
+        # The penalty subtracts from each state's ΔV in proportion to how
+        # over-represented it already is. Uniform share = 1/n_states.
+        # State at uniform share: no penalty. State at 100% of pop: full
+        # penalty (the entire field shouldn't be one state).
+        n_states_active = len(self.CANDIDATE_STATES)
+        uniform_share = 1.0 / n_states_active
+        prev_pop_w = torch.zeros(n_states_active, device=self.device)
+        for k, sid in enumerate(self.CANDIDATE_STATES):
+            if sid < 20:
+                prev_pop_w[k] = self.state_weights[sid].item()
+        excess = (prev_pop_w - uniform_share).clamp(min=0)  # (n_states,)
+        # Penalty strength tuned to roughly cancel a 50% population state's
+        # α-advantage: a state at w=0.5 gets penalty ~0.4 (which roughly
+        # offsets ~0.4 of α-baseline gain).
+        pop_penalty = 3.0 * excess                          # (n_states,)
+        delta_V = delta_V - pop_penalty.unsqueeze(0)        # broadcast (1, n_states)
+
+        # EMERGENT SELF-ANNEALING (not a hand-set magnitude schedule).
+        # The temperature is driven by the field's OWN decisiveness: the mean
+        # margin by which each routable oscillator's best state beats Classical
+        # (delta_V already carries this). When the valence landscape is sharp
+        # (one state clearly wins) the field is confident → low temp → routing
+        # approaches argmax(valence) — the limit line 28 promises. When states
+        # tie (margin ≈ 0) → high temp → exploration. As the field organizes,
+        # margins grow and it anneals on its own — no fixed function of training
+        # progress. NA (arousal) still scales it as a neuromodulator.
+        # Use ROUTABLE (interior minus locked) — locked osc keep their state.
+        if routable.any():
+            decisiveness = delta_V[routable].max(dim=-1).values.clamp(min=0.0).mean()
+        else:
+            decisiveness = torch.tensor(0.0, device=self.device)
+        _na = self._neuro.get('na', 1.0)
+        # temp falls as the field's valence margin rises (confident → cold).
+        temperature = (0.5 / (1.0 + 8.0 * decisiveness)).item() * _na
+        temperature = max(temperature, 0.02)
+
+        # Add per-oscillator noise for exploration (Gumbel-max trick).
+        dV_int = delta_V[routable]  # (n_routable, n_states) — locked excluded
+        if dV_int.shape[0] > 0:
+            # Standard Gumbel-max reparameterization: sample ∝ argmax over
+            # (logits + g)/T, where g ~ Gumbel(0,1). The noise MUST be scaled by
+            # the same temperature as the logits. The previous form
+            # (dV_int/T + 0.3·g) decoupled them, so as T fell the logits blew up
+            # and the fixed-scale noise became negligible — stochastic routing
+            # died abruptly instead of annealing. With proper coupling, high T =
+            # noise-dominated (explore), low T = logit-dominated (exploit),
+            # smoothly. (Gumbel is scale-invariant to the constant inside the
+            # double-log, so no extra coefficient is needed.)
+            gumbel_noise = -torch.log(-torch.log(torch.rand_like(dV_int).clamp(1e-8, 1-1e-8)))
+            noisy_scores = (dV_int + gumbel_noise) / temperature
+
+            # Sample state (Gumbel-softmax argmax)
+            best_idx = noisy_scores.argmax(dim=-1)
+            best_state = torch.tensor(
+                [self.CANDIDATE_STATES[i] for i in best_idx],
+                device=self.device, dtype=torch.long
+            )
+            # Write back ONLY to routable (unlocked) osc.
+            # Locked osc keep their HOLOGRAPHIC assignment from consolidate_class.
+            self.state_id[routable] = best_state
+
+            # Soft probs for state weights (without noise) — also from routable only
+            soft_probs = torch.softmax(dV_int / max(temperature, 0.05), dim=-1)
+        else:
+            soft_probs = torch.zeros(0, len(self.CANDIDATE_STATES), device=self.device)
+
+        # Get the α for each oscillator's chosen state
+        best_a = torch.zeros(n, device=self.device)
+        for k, sid in enumerate(self.CANDIDATE_STATES):
+            mask = (self.state_id == sid) & self.alive_mask
+            if mask.any():
+                a_k, _, _, _ = alpha_for_state(
+                    sid, self.theta, self.S, self.f, self.N,
+                    self.energy(), self.a0, ctx
+                )
+                best_a = torch.where(mask, a_k, best_a)
+
+        # Update state population weights — includes LOCKED osc in their
+        # consolidated state. This way the population-balance penalty knows
+        # the true distribution (e.g., 40 locked HOLOGRAPHIC count).
+        state_weights = torch.zeros(N_STATE_SLOTS, device=self.device)
+        n_int_total = int(interior.sum())
+        if n_int_total > 0:
+            # Count locked osc by their assigned state (which is preserved)
+            for sid in self.CANDIDATE_STATES:
+                if sid < 20:
+                    locked_in_state = ((self.state_id == sid) &
+                                        interior & self._class_locked).sum().float()
+                    state_weights[sid] = locked_in_state / n_int_total
+            # Add routable contribution from soft_probs
+            if soft_probs.shape[0] > 0:
+                n_routable = soft_probs.shape[0]
+                routable_probs = soft_probs.sum(dim=0) / n_int_total
+                for k, sid in enumerate(self.CANDIDATE_STATES):
+                    if sid < 20:
+                        state_weights[sid] = state_weights[sid] + routable_probs[k]
+        self.state_weights = state_weights
+
+        best_a = torch.where(self.alive_mask, best_a, torch.zeros_like(best_a))
+        return s, best_a
+
+    def _bond_inputs(self, chunk=256, split=False):
+        """
+        Phase-gated bond drive with P_in vs C_ij separation.
+        Eq 4: E[n+1] = α·E[n] + β·P_in + Σ_j C_ij(E_i-E_j)
+        """
+        n = self.n_max
+        cosd = self.phase_vec @ self.phase_vec.T
+        gate_full = (1.0 + cosd) * 0.5 * self.C_mask.float()
+
+        sens = self._is_sensory
+        sens_f = sens.float().unsqueeze(0)
+        recur_f = (~sens).float().unsqueeze(0)
+
+        out_sens = torch.zeros(n, self.d, device=self.device)
+        out_recur = torch.zeros(n, self.d, device=self.device)
+
+        # NOTE: previously we applied self._holo_projector to drives going
+        # INTO teaching slots. That was wrong — the projector is rank
+        # ~n_classes in d-space, so it zeros some teach c-vector directions
+        # and preserves others, causing massive class bias toward whichever
+        # classes happen to align with the projector subspace.
+        # The projector is still used appropriately for HOLOGRAPHIC-state
+        # interior oscillators (in alpha_for_state / valence computation),
+        # but NOT for the readout pathway. Sensor→teach bond drive must pass
+        # through unchanged for class discrimination to work.
+        for r0 in range(0, n, chunk):
+            r1 = min(r0 + chunk, n)
+            tr = torch.einsum('ijde,je->ijd', self.C[r0:r1], self.s)
+            gated = tr * gate_full[r0:r1].unsqueeze(-1)
+            drive_s = (gated * sens_f.unsqueeze(-1)).sum(1)
+            drive_r = (gated * recur_f.unsqueeze(-1)).sum(1)
+
+            out_sens[r0:r1] = drive_s
+            out_recur[r0:r1] = drive_r
+            del tr, gated, drive_s, drive_r
+
+        if split:
+            return out_sens, out_recur
+        return out_sens + out_recur
+
+    def _update_phase(self, dt=0.08):
+        """Kuramoto-style phase coupling."""
+        phi = self.phase_angle()
+        sd = torch.sin(phi.unsqueeze(0) - phi.unsqueeze(1))
+        bm = self.C.norm(dim=(-2, -1))
+        A = self.C_mask.float() * bm
+        deg = A.sum(1).clamp(min=1.0)
+        coup = 0.6 * (A * sd).sum(1) / deg
+        omega = 2 * math.pi * self.f / 9.0 * 0.2
+        free = self.alive_mask & ~self._is_sensory & ~self._is_teaching
+        np_ = phi + torch.where(free, dt * (omega + coup), torch.zeros_like(phi))
+        self.phase_vec = torch.stack([torch.cos(np_), torch.sin(np_)], 1)
+
+    def _dynamics_step(self, ctx, pin_sensory=None, pin_teaching=None,
+                       bond_chunk=256):
+        """
+        ONE PHYSICS TICK:
+          0. Phase update (Kuramoto)
+          1. Emergent routing (argmax valence)
+          2. Bond drive (split sensory/recurrent)
+          3. Direction: rotate ŝ toward d̂ by (π/2)(1−α)
+          4. Energy: Eq 4 + cross-state coupling
+          5. Pin sensory/teaching
+          6. Update state variables
+        """
+        with torch.no_grad():
+            alive = self.alive_mask.clone()
+            n, d = self.n_max, self.d
+
+            # 0. Phase
+            self._update_phase()
+
+            # 1. Route
+            if ctx is None:
+                ctx = self._build_routing_ctx()
+            _, alpha = self._route_states(ctx)
+
+            # 2. Bond drive with MULTIPLICATIVE INPUT GATING
+            # Key architectural fix: the recurrent drive to each interior oscillator
+            # is MODULATED by how much that oscillator's identity (c_i) resonates
+            # with the current sensory input. This creates input-dependent attractors:
+            # - A-resonant oscillators get amplified drive during A-input
+            # - B-resonant oscillators get amplified drive during B-input
+            # This is analogous to gain modulation in biological neural circuits.
+            drive_sens, drive_recur = self._bond_inputs(chunk=bond_chunk, split=True)
+            drive_sens = drive_sens * alive.float().unsqueeze(-1)
+            drive_recur = drive_recur * alive.float().unsqueeze(-1)
+
+            # Compute input-dependent gain for interior oscillators
+            if self.input_dim is not None and pin_sensory is not None:
+                # Input signature in d-space
+                input_sig = pin_sensory.sum(0)  # (d,) sum of sensory state vectors
+                input_sig = input_sig / input_sig.norm().clamp(min=1e-6)
+                # Resonance: how aligned is each oscillator's c with input?
+                resonance = (self.c * input_sig.unsqueeze(0)).sum(-1)  # (n,)
+                # Gain: resonant oscillators get amplified recurrent drive
+                # NA scales the contrast: high NA → steeper gain curve (sharper SNR)
+                _na_gain = self._neuro.get('na', 1.0)
+                r = (resonance + 1.0) / 2.0  # normalize resonance to [0,1]
+                gain_lo = max(0.05, 0.1 / _na_gain)   # suppress non-resonant harder at high NA
+                gain_hi = 0.1 + 1.9 * _na_gain        # amplify resonant more at high NA
+                gain = (gain_lo + (gain_hi - gain_lo) * r).clamp(0.05, 4.0)
+                # Only gate interior oscillators (not sensory/teaching)
+                interior_mask = ~self._is_sensory & ~self._is_teaching
+                gain = torch.where(interior_mask, gain, torch.ones_like(gain))
+                # Apply gain to recurrent drive
+                drive_recur = drive_recur * gain.unsqueeze(-1)
+
+            drive = drive_sens + drive_recur
+
+            d_mag = drive.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+            d_hat = drive / d_mag
+
+            # 3. Direction: rotate ŝ toward d̂
+            s = self.s
+            s_mag = s.norm(dim=-1, keepdim=True)
+            s_hat = torch.where(s_mag < 1e-6, d_hat, s / s_mag.clamp(min=1e-8))
+
+            perp = d_hat - (d_hat * s_hat).sum(-1, keepdim=True) * s_hat
+            pn = perp.norm(dim=-1, keepdim=True)
+            perp_hat = torch.where(pn > 1e-6, perp / pn.clamp(min=1e-8),
+                                   torch.zeros_like(perp))
+
+            theta_ev = (math.pi / 2) * (1.0 - alpha).clamp(0, 1).unsqueeze(-1)
+            new_hat = torch.cos(theta_ev) * s_hat + torch.sin(theta_ev) * perp_hat
+
+            # 4. Energy — Eq 4 + cross-state coupling
+            E = (s_mag.squeeze(-1) ** 2)
+            beta = 0.5  # Increased from 0.15: sensory input must be strong enough to steer dynamics
+            sens_mag = drive_sens.norm(dim=-1)
+            P_in = sens_mag ** 2
+            # Eq 1/4 USABLE energy: input couples through the RECEIVING node's
+            # golden/3-6-9 resonance (resonant absorption) — usable = raw × its
+            # alignment. α now encodes that resonance (Eq 3 fix), so gate the
+            # source by it, bounded [0.4,1.0] so non-resonant nodes still absorb.
+            P_in = P_in * (0.4 + 0.6 * alpha.clamp(0.0, 1.0))
+
+            # TEACHING READOUT: Use ONLY sensory drive for teaching P_in.
+            #
+            # WHY: Interior oscillators converge to the same attractor regardless
+            # of input (recurrent bonds dominate). So drive_recur is input-INDEPENDENT.
+            # But drive_sens comes from sensor→teaching bonds, which encode the
+            # input pattern directly. Using only drive_sens makes the readout
+            # input-dependent, enabling discrimination.
+            #
+            # The signed projection onto c_i gives class-specific activation:
+            # - Bonds formed during class A training: C[teach0, sensor_j] = outer(c0, s_j_A)
+            # - During eval with A-input: drive_sens · c0 = sum_j (s_j_A_train · s_j_A_eval) > 0
+            # - During eval with B-input: drive_sens · c0 = sum_j (s_j_A_train · s_j_B_eval) ≈ 0
+            #   (because A and B inputs are different patterns)
+            # This creates natural discrimination WITHOUT forgetting.
+            teach_mask = self._is_teaching
+            # For teaching: use sensory drive only (input-dependent)
+            drive_sens_proj = (drive_sens * self.c).sum(-1)  # (n,)
+            P_in_teach = drive_sens_proj.clamp(min=0.0) ** 2
+            # Regular oscillators use full sensory drive norm
+            P_in = torch.where(teach_mask, P_in_teach, P_in)
+
+            # Teaching slots need a base alpha (moderate retention).
+            alpha = torch.where(teach_mask,
+                                torch.full_like(alpha, 0.5),
+                                alpha)
+
+            # Cross-state energy flow (Unified Master Equation)
+            #   E flow_i = Σ_j C_ij · w_j · (E_j − E_i) · cos(φ_ij)
+            # The cos(φ_ij) is the framework's PHASE ANGLE BETWEEN STATES — the
+            # term that turns coupling into interference. φ_i is each node's
+            # accrued quantum phase (angle of its complex amplitude ψ=s+i·s_imag
+            # along its own identity c); φ_ij = φ_i − φ_state_j. Coherent nodes
+            # whose phase aligns with a state couple constructively (cos→+1);
+            # anti-aligned nodes couple destructively (cos→−1). Purely classical
+            # nodes carry s_imag=0 ⇒ φ=0 ⇒ cos=1, recovering plain diffusion —
+            # so this is a strict generalization, on for everyone, no toggle.
+            mean_E_per_state = torch.zeros(N_STATE_SLOTS, device=self.device)
+            mean_cos_state   = torch.ones(N_STATE_SLOTS, device=self.device)
+            mean_sin_state   = torch.zeros(N_STATE_SLOTS, device=self.device)
+            # per-node phase of the complex amplitude along identity c
+            s_re_proj = (self.s * self.c).sum(-1)
+            s_im_proj = (self.s_imag * self.c).sum(-1)
+            phi_node  = torch.atan2(s_im_proj, s_re_proj)   # 0 where s_imag=0
+            cos_node  = torch.cos(phi_node)
+            sin_node  = torch.sin(phi_node)
+            for sid in self.CANDIDATE_STATES:
+                mask_sid = (self.state_id == sid) & alive
+                if mask_sid.any():
+                    mean_E_per_state[sid] = E[mask_sid].mean()
+                    mean_cos_state[sid]   = cos_node[mask_sid].mean()
+                    mean_sin_state[sid]   = sin_node[mask_sid].mean()
+
+            sid_per_osc = self.state_id
+            C_rows = self.C_states[sid_per_osc]
+            # Ultimate Eq coupling: Σ_j C_ij·w_j·√(E_i·E_j)·cos(φ_ij). CONSTRUCTIVE
+            # geometric-mean product (non-negative amplitude), phase-gated — NOT
+            # a (E_j−E_i) diffusion. cos(φ_ij) sets constructive(+)/destructive(−);
+            # √(E_i·E_j) amplifies coupling when BOTH states carry energy.
+            E_geo = torch.sqrt(E.clamp(min=0).unsqueeze(-1)
+                               * mean_E_per_state.clamp(min=0).unsqueeze(0) + 1e-12)
+            w_states = self.state_weights[:N_STATE_SLOTS].unsqueeze(0)
+            # cos(φ_i − φ_j) = cosφ_i·cosφ_j + sinφ_i·sinφ_j  (circular-mean state phase)
+            phase_factor = (cos_node.unsqueeze(-1) * mean_cos_state.unsqueeze(0)
+                            + sin_node.unsqueeze(-1) * mean_sin_state.unsqueeze(0))
+            cross_flow = (C_rows * E_geo * w_states * phase_factor).sum(-1)
+            # bound the constructive coupling so it can't run away (|flow| ≤ ½E_i)
+            cap = 0.5 * E
+            cross_flow = torch.maximum(torch.minimum(cross_flow, cap), -cap)
+            # Teaching slots don't participate in cross-state flow
+            cross_flow = torch.where(teach_mask, torch.zeros_like(cross_flow), cross_flow)
+
+            # Eq 4: E[n+1] = α·E[n] + β·P_in + cross_flow
+            E_next = alpha * E + beta * P_in + cross_flow
+
+            # ── COUPLING BRIDGE: class-slot competition (Eq-6 lateral inhibition)
+            # The class memories are stored DISJOINT (bonds never overwrite each
+            # other → retention). But at readout they must COMPARE: the slot that
+            # best resonates with the current field suppresses the others. This is
+            # the native, unsupervised counterpart of the whitened readout's class-
+            # decorrelation — competition in the field instead of a label-fitted
+            # transform. It makes the answer emerge from the class memories
+            # comparing notes, WITHOUT altering their stored bonds, so readout
+            # interference falls while stored-memory retention is untouched.
+            if self.t_start is not None and (self.t_end - self.t_start) > 1:
+                t0, t1 = self.t_start, self.t_end
+                Et = E_next[t0:t1]                                # (n_cls,) slot energies
+                n_other = max(t1 - t0 - 1, 1)
+                others = (Et.sum() - Et) / n_other               # mean energy of the OTHERS
+                kappa = 0.6                                      # competition strength
+                E_next = E_next.clone()
+                E_next[t0:t1] = (Et - kappa * others).clamp(min=0.0)
+
+            # Vacuum zero-point floor
+            vacuum_mask = (sid_per_osc == S_VACUUM)
+            E_next = torch.where(vacuum_mask,
+                                 torch.maximum(E_next, self.vacuum_energy * 0.3),
+                                 E_next)
+
+            # ── Cue-triggered recall ──────────────────────────────────────────
+            # A dormant (vacuum) memory whose stored identity resonates with the
+            # CURRENT input is re-energized well above the floor and released from
+            # the reservoir, so routing can promote it back to an active state.
+            # This is the "slowly forgotten but suddenly recalled" path: the trace
+            # was preserved (bonds/identity frozen in vacuum), and the matching cue
+            # brings it back to life.
+            if (pin_sensory is not None and self.input_dim is not None
+                    and bool(vacuum_mask.any())):
+                input_sig = pin_sensory.sum(0)                   # (d,)
+                in_norm = input_sig.norm()
+                if in_norm > 1e-5:
+                    input_sig = input_sig / in_norm
+                    resonance = (self.c * input_sig.unsqueeze(0)).sum(-1)  # (n,)
+                    recall_mask = vacuum_mask & (resonance > RECALL_RESONANCE)
+                    if bool(recall_mask.any()):
+                        boost = (resonance.clamp(0.0, 1.0) ** 2) * 2.0
+                        E_next = torch.where(recall_mask,
+                                             torch.maximum(E_next, boost), E_next)
+                        # release from the reservoir → routing re-evaluates next tick
+                        self.state_id = torch.where(
+                            recall_mask,
+                            torch.full_like(self.state_id, S_CLASSICAL),
+                            self.state_id)
+
+            # Time dilation: high-γ oscillators change slower
+            # CRITICAL: Teaching slots BYPASS time dilation.
+            # They are readout nodes that must respond immediately to bond drive.
+            dilation = 1.0 / self.gamma.clamp(min=1.0)
+            # Teaching slots get dilation=1.0 (no slowdown)
+            dilation = torch.where(teach_mask, torch.ones_like(dilation), dilation)
+            E_next = E + (E_next - E) * dilation
+
+            # Phantom energy GAIN is already applied by Eq 4 above: for Phantom
+            # nodes, alpha sits in the [1.00, 1.05] band (the only state with
+            # α>1), so E_next = alpha·E already grows their energy by the
+            # framework-correct amount. A second multiplier here would apply the
+            # gain TWICE per tick and break the preservation hierarchy. Removed.
+
+            # Clamp energy to prevent explosion
+            # Teaching slots get higher clamp to preserve discriminative signal
+            max_E = torch.where(teach_mask,
+                                torch.full_like(E_next, 50.0),
+                                torch.full_like(E_next, 5.0))
+            E_next = E_next.clamp(min=0.0)
+            E_next = torch.min(E_next, max_E)
+
+            # Assemble new state vector
+            new_mag = torch.sqrt(E_next.clamp(min=0.0))
+            new_s = new_hat * new_mag.unsqueeze(-1)
+
+            # 5. Pin sensory and teaching
+            if pin_sensory is not None:
+                new_s[:self.input_dim] = pin_sensory
+            if pin_teaching is not None and self.t_start is not None:
+                new_s[self.t_start:self.t_end] = pin_teaching
+
+            # UERF PRESERVATION (framework fidelity, not an optimization):
+            # Class-locked oscillators are the permanent reference nodes —
+            # α≈0.998→1.0, the information-preservation regime. Physically α→1
+            # means state is CONSERVED across a tick, not re-derived from drive.
+            # Only _class_locked is fully frozen here. Crystallized nodes sit at
+            # α≈0.98 (minimal decay, still slowly evolving) and are handled by
+            # the decay block — freezing them here would over-preserve and
+            # contradict their α<1. _class_locked is always interior (see
+            # consolidate_class), so this never clobbers the sensory/teaching
+            # pins applied above.
+            # GRADED: a locked node is frozen only while its preservation is
+            # high. Once a consolidated memory fades (preservation <= floor) it
+            # is no longer pinned and follows normal dynamics — it can fall to
+            # vacuum and be recalled — so consolidation is reversible.
+            frozen = self._class_locked & (self._preservation > PRESERVE_FLOOR)
+            if frozen.any():
+                new_s = torch.where(frozen.unsqueeze(-1), self.s, new_s)
+
+            # Literal quantum evolution: nodes in QUANTUM/QUBIT states advance
+            # their complex amplitude unitarily (superposition + Lindblad
+            # decoherence). Purely real / no-op for every other node.
+            new_s = self._quantum_evolve(new_s, alpha)
+
+            self.s = new_s * alive.float().unsqueeze(-1)
+
+            # 6. Update state variables
+            self._update_state_variables(alive)
+
+    def _update_state_variables(self, alive):
+        """Evolve auxiliary state variables each tick."""
+        with torch.no_grad():
+            s = self.s
+            mag = s.norm(dim=-1)
+            E = mag ** 2
+
+            # Local temperature (energy variance over history)
+            self._E_history = torch.roll(self._E_history, 1, dims=1)
+            self._E_history[:, 0] = E
+            self.local_T = self._E_history.var(dim=1).clamp(min=1e-3, max=2.0)
+
+            # Only genuinely divergent oscillators should enter PHANTOM.
+            out_flow = self.C_mask.float().sum(dim=1)
+            in_flow = self.C_mask.float().sum(dim=0)
+            # Normalized divergence: positive = more outgoing
+            div_norm = (out_flow - in_flow) / (out_flow + in_flow + 1.0).clamp(min=1.0)
+            # EMA update: slow adaptation prevents momentary spikes from triggering PHANTOM
+            # base below −1 so a routed PHANTOM node actually sits in the w<−1
+            # energy-gain regime (previously base −1.0 kept most nodes at w>−1,
+            # collapsing the gain to ~1); allow down to −2.0 for strong divergence.
+            target_w = -1.15 - 0.45 * torch.tanh(div_norm * 2.0)  # range [-1.6, -0.7]
+            self.local_w = 0.95 * self.local_w + 0.05 * target_w
+            self.local_w = self.local_w.clamp(-2.0, -0.7)
+
+            # Lorentz γ from full vector velocity
+            if self._prev_s is not None:
+                ds = s - self._prev_s
+                v_full = ds.norm(dim=-1)
+                scale = mag[alive].mean().clamp(min=0.1) if alive.any() else torch.tensor(0.1, device=self.device)
+                beta = (v_full / scale).clamp(0.0, 0.95)
+                self.local_v2c2 = (beta ** 2).clamp(0.0, 0.95)
+                self.gamma = (1.0 / torch.sqrt(1.0 - self.local_v2c2)).clamp(1.0, 3.0)
+            else:
+                self._prev_s = s.clone()
+
+            # Proper time accrual with dilation
+            dt = 1.0
+            activity = (mag > 0.05).float()
+            self.proper_time = self.proper_time + dt * activity / self.gamma
+
+            # Fractal scale memory (sample at φ^k intervals)
+            ec = self.experience_count
+            self.scale_memory[:, 0] = s
+            for k in range(1, 4):
+                period = max(1, int(round(PHI ** k)))
+                if ec % period == 0:
+                    self.scale_memory[:, k] = self.scale_memory[:, k - 1]
+
+            # Multiversal branches
+            for j in range(4):
+                T_self = 0.3 + 0.1 * j
+                self.s_branches[:, j] = (
+                    (1.0 - T_self) * self.s_branches[:, j] + T_self * s
+                )
+                # Decorrelate from other branches
+                for k in range(4):
+                    if k != j:
+                        overlap = (self.s_branches[:, j] * self.s_branches[:, k]).sum(-1, keepdim=True)
+                        sk_mag2 = (self.s_branches[:, k] ** 2).sum(-1, keepdim=True).clamp(min=1e-8)
+                        self.s_branches[:, j] = self.s_branches[:, j] - 0.03 * overlap / sk_mag2 * self.s_branches[:, k]
+
+            # Branch weights
+            s_mag_local = mag.clamp(min=1e-8)
+            branch_aligns = torch.zeros(self.n_max, 4, device=self.device)
+            for j in range(4):
+                sb = self.s_branches[:, j]
+                sb_mag = sb.norm(dim=-1).clamp(min=1e-8)
+                pred_match = (sb * s).sum(-1) / (sb_mag * s_mag_local)
+                branch_aligns[:, j] = pred_match.clamp(-1, 1)
+            bw_new = torch.softmax(branch_aligns * 3.0, dim=-1)
+            self.branch_weights = 0.9 * self.branch_weights + 0.1 * bw_new
+
+            # Store current prediction before updating (for accuracy measurement)
+            self._prev_prediction = self.future_prediction.clone()
+            # Predict: current state + velocity (momentum-based prediction)
+            if self._prev_s is not None:
+                ds = s - self._prev_s
+                self.future_prediction = s + ds * self.gamma.unsqueeze(-1) * 0.5
+            else:
+                self.future_prediction = s.clone()
+
+            # Force channels (running coupling constants)
+            Q2 = E.clamp(min=1e-3)
+            self.force_channels[:, 0] = (0.07 + 0.02 * torch.log(1.0 + Q2)).clamp(0, 1)
+            self.force_channels[:, 1] = (1.0 / (1.0 + 0.3 * torch.log(1.0 + Q2))).clamp(0, 1)
+            self.force_channels[:, 2] = (0.03 + 0.05 * torch.tanh(Q2 / 3.0)).clamp(0, 1)
+            self.force_channels[:, 3] = (Q2 / (1.0 + Q2)).clamp(0, 1)
+
+            # Vacuum energy (inverse of activity)
+            quiet_proxy = torch.exp(-mag * 2.0)
+            self.vacuum_energy = 0.95 * self.vacuum_energy + 0.05 * quiet_proxy
+
+            self._prev_mag = mag.clone()
+            self._prev_s = s.clone()
+
+
+    def _quantum_evolve(self, new_s, alpha):
+        """LITERAL quantum evolution for oscillators in the QUANTUM / QUBIT
+        states, implementing the framework doc's Eq 2/5 for those regimes:
+
+          ψ = s + i·s_imag                       (complex amplitude / pure state)
+          ψ[n+1] = U(α)·ψ[n]                      unitary: U = exp(-i H dt)
+          then a Lindblad dissipator damps coherence (the imaginary/off-basis
+          part) at rate γ/preservation           (decoherence toward classical)
+          norm is conserved                       (unitarity; energy Tr(ρH) stable)
+
+        H is diagonal in the identity basis with per-mode energies ω_j drawn
+        from the oscillator's own spectrum (f, |c|), so the phase each amplitude
+        accrues is the node's intrinsic frequency — genuine coherent evolution,
+        not a scalar multiplier. The field only ever *measures* the real part
+        (Born observable), so the rest of the brain is unaffected; superposition
+        lives entirely inside the quantum-state nodes between measurements.
+
+        Purely real fallback: with s_imag=0 and no phase this reduces to identity,
+        so a node that never enters a quantum state behaves exactly as before."""
+        qmask = (self.state_id == S_QUANTUM) | (self.state_id == S_QUBIT)
+        # nodes that just LEFT a quantum state decohere fully (measurement)
+        left = (~qmask) & (self.s_imag.abs().sum(-1) > 0)
+        if left.any():
+            self.s_imag = self.s_imag.clone()
+            self.s_imag[left] = 0.0
+        if not bool(qmask.any()):
+            return new_s
+        idx = qmask.nonzero(as_tuple=True)[0]
+        psi_r = new_s[idx]                                  # (k, d) real amplitude
+        psi_i = self.s_imag[idx]                            # (k, d) imag amplitude
+        a = alpha[idx].clamp(0.0, 1.0).unsqueeze(-1)        # (k,1)
+
+        # ── Unitary U = exp(-iH dt): per-mode Hamiltonian energies ω_j ───────
+        omega = (self.c[idx].abs() * self.f[idx].unsqueeze(-1))   # (k,d) mode energies
+        dt = (1.0 - a)                                       # more evolution when α<1
+        phase = omega * dt * math.pi
+        cos_p, sin_p = torch.cos(phase), torch.sin(phase)
+        # e^{-iθ}(ψ_r + iψ_i) = (cosθ ψ_r + sinθ ψ_i) + i(cosθ ψ_i − sinθ ψ_r)
+        nr = cos_p * psi_r + sin_p * psi_i
+        ni = cos_p * psi_i - sin_p * psi_r
+
+        # ── Lindblad decoherence: damp the coherent (imag) part ─────────────
+        gamma = (1.0 - a.squeeze(-1)) / self._preservation[idx].clamp(min=0.1)
+        ni = ni * torch.exp(-0.5 * gamma).unsqueeze(-1)
+
+        # ── conserve norm (unitarity → energy Tr(ρH) preserved) ─────────────
+        n_old = (psi_r ** 2 + psi_i ** 2).sum(-1, keepdim=True).sqrt().clamp(min=1e-8)
+        n_new = (nr ** 2 + ni ** 2).sum(-1, keepdim=True).sqrt().clamp(min=1e-8)
+        scale = n_old / n_new
+        nr = nr * scale
+        ni = ni * scale
+
+        out = new_s.clone()
+        out[idx] = nr
+        self.s_imag = self.s_imag.clone()
+        self.s_imag[idx] = ni
+        return out
+
+
+# Attach dynamics methods to UERFField
+for _m in ('_build_routing_ctx', '_route_states', '_bond_inputs', '_update_phase',
+           '_dynamics_step', '_update_state_variables', '_quantum_evolve'):
+    setattr(UERFField, _m, getattr(UERFDynamics, _m))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PART 4 — VALENCE-DRIVEN LEARNING + GROWTH + DEATH
+# ═══════════════════════════════════════════════════════════════════════════════
+class UERFLearning:
+    """Mixin: learning, crystallization, birth/death."""
+
+    def _valence_per_osc(self, lam=0.25):
+        """V_i = α_i⟨s_i,R_i⟩ − λ‖s_i−I_i‖²"""
+        alpha = self._alpha_of_current_state({})
+        R = self.c
+        I = self.c * self.state_magnitude().unsqueeze(-1)
+        return valence(self.s, R, I, alpha, lam=lam), alpha
+
+    def _alpha_of_current_state(self, ctx):
+        """α for each oscillator under its currently routed state."""
+        n = self.n_max
+        out = torch.zeros(n, device=self.device)
+        for sid in self.CANDIDATE_STATES + [S_PHANTOM, S_CLASSICAL]:
+            m = (self.state_id == sid)
+            if not m.any():
+                continue
+            a, _, _, _ = alpha_for_state(sid, self.theta, self.S, self.f,
+                                         self.N, self.energy(), self.a0, ctx)
+            out = torch.where(m, a, out)
+        return out
+
+    def _learn_bonds(self, lr=0.08, decay=1e-3, lam=0.25, chunk=128):
+        """
+        VALENCE-ASCENT BOND UPDATE.
+        ΔC[i,j] ∝ α_i · (R_i − λ(s_i−I_i)) ⊗ s_j  (outer product)
+        
+        THREE PATHWAYS:
+          1. Interior ← (Interior + Sensor): interior oscillators learn from all alive
+          2. Teaching ← Interior: readout bonds (how interior drives teaching slots)
+          3. Interior ← Teaching: feedback bonds (teaching signal back-propagates)
+        """
+        with torch.no_grad():
+            alive = self.alive_mask
+            interior = alive & ~self._is_sensory & ~self._is_teaching
+            teach = self._is_teaching
+            sens = self._is_sensory
+            if not interior.any():
+                return
+
+            alpha = self._alpha_of_current_state({})
+            s = self.s
+            c = self.c
+            mag = self.state_magnitude()
+            I = c * mag.unsqueeze(-1)
+
+            # Gradient of valence w.r.t. s_i direction
+            grad_v = alpha.unsqueeze(-1) * c - 2 * lam * (s - I)
+
+            n = self.n_max
+            d = self.d
+
+            # ── Three-factor dopaminergic credit (eligibility × RPE) ──────────
+            # DA is a CREDIT signal, not a global learning-rate knob: it must
+            # potentiate the oscillators that actually drove the (mis)prediction
+            # and leave the rest alone. The eligibility trace is each unit's
+            # activity this step — its state magnitude, normalized to the active
+            # interior mean. da_per = 1 + (DA-1)·tanh(mag/mean_act):
+            #   wrong (DA>1): ACTIVE units potentiate harder; quiet units ~1.0
+            #   right (DA<1): ACTIVE units consolidate (less plastic); quiet ~1.0
+            # tanh(mag/mean_act) scales the DA deviation by per-unit activity:
+            # a unit at the population mean gets tanh(1)≈0.76 of the deviation,
+            # the most active units approach the full DA level, quiet units ~1.0.
+            # This concentrates credit on the units that drove the prediction.
+            _da_level = self._neuro.get('da', 1.0)
+            if interior.any():
+                _mean_act = mag[interior].mean().clamp(min=1e-6)
+            else:
+                _mean_act = torch.tensor(1.0, device=self.device)
+            da_per = 1.0 + (_da_level - 1.0) * torch.tanh(mag / _mean_act)  # (n,)
+
+            # PATHWAY 1: Interior receivers learn from all alive senders.
+            # EXCEPT class-locked osc — their incoming bonds are FROZEN
+            # (consolidated class memory). They still PARTICIPATE as senders
+            # (their pattern drives other osc), but they no longer learn.
+            receivers = interior & ~self._class_locked
+            for r0 in range(0, n, chunk):
+                r1 = min(r0 + chunk, n)
+                recv_mask = receivers[r0:r1]
+                if not recv_mask.any():
+                    continue
+
+                gv = grad_v[r0:r1]  # (chunk, d)
+                delta_C = torch.einsum('id,je->ijde', gv, s)  # (chunk, n, d, d)
+
+                sender_alive = alive.float().unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+                delta_C = delta_C * sender_alive
+
+                alpha_scale = alpha[r0:r1].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+                # ACh = global plasticity gain (basal-forebrain-style broadcast);
+                # DA = per-oscillator credit via the eligibility trace da_per.
+                _ach = self._neuro.get('ach', 1.0)
+                da_chunk = da_per[r0:r1].view(-1, 1, 1, 1)   # (chunk,1,1,1) per receiver
+                self.C[r0:r1] += lr * _ach * da_chunk * alpha_scale * delta_C * recv_mask.float().unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+                # Decay bonds. ONLY interior receivers decay; every non-receiver
+                # row — teach-slot readout rows and locked consolidated nodes —
+                # is frozen. This is what makes the disjoint per-class accumulator
+                # guarantee real: an inactive class's readout bonds never erode
+                # while other classes train.
+                # VACUUM nodes are also frozen: a memory demoted to the dormant
+                # reservoir keeps its faded-but-nonzero trace (it does NOT decay
+                # to zero), so a matching cue can later recall it.
+                locked_chunk = self._class_locked[r0:r1]
+                vacuum_chunk  = (self.state_id[r0:r1] == S_VACUUM)
+                _ach_d = self._neuro.get('ach', 1.0)  # higher ACh → less decay
+                is_receiver = recv_mask & ~locked_chunk & ~vacuum_chunk
+                decay_per_row = torch.where(
+                    is_receiver,
+                    torch.tensor(1.0 - decay / _ach_d, device=self.device),
+                    torch.tensor(1.0, device=self.device))   # non-receivers frozen
+                self.C[r0:r1] *= decay_per_row.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+                del delta_C
+
+            # PATHWAY 2: Teaching slots RECEIVE from sensors (readout pathway).
+            # Only the ACTIVE class slot is updated: its bonds accumulate the
+            # running mean of the (zero-mean) sensor pattern for that class.
+            # Inactive classes are left untouched — disjoint per-class storage is
+            # what gives the zero-forgetting guarantee. Discrimination does NOT
+            # come from anti-Hebbian weakening here (that would couple classes
+            # and break disjoint storage); it comes from the zero-mean sensory
+            # encoding (see SensoryProjection.mean_raw), which removes the
+            # common-mode so each class's stored mean is its distinctive pattern.
+            if self.t_start is not None:
+                t0, t1 = self.t_start, self.t_end
+                n_cls = t1 - t0
+                teach_c = c[t0:t1]  # (n_classes, d)
+
+                # Determine which class is currently active (highest pinned magnitude)
+                teach_mags = s[t0:t1].norm(dim=-1)
+                active_class = teach_mags.argmax().item()
+
+                # Interior oscillators that will form readout bonds
+                interior_idx = interior.nonzero(as_tuple=True)[0]
+                # Use top-k most active interior oscillators for efficiency
+                int_mags = mag[interior_idx]
+                n_bond_targets = min(40, len(interior_idx))
+                if len(interior_idx) > n_bond_targets:
+                    _, top_k = int_mags.topk(n_bond_targets)
+                    bond_idx = interior_idx[top_k]
+                else:
+                    bond_idx = interior_idx
+
+                if len(bond_idx) > 0:
+                    # SENSORY-BASED READOUT — TRUE RUNNING MEAN (not EMA).
+                    #
+                    # Bonds for class c are the MEAN outer-product over all
+                    # examples of class c. Phase B examples for classes 5-9
+                    # only update the accumulators for classes 5-9. Phase A
+                    # bonds (classes 0-4) never decay or drift — they stay
+                    # as the mean of Phase A inputs forever.
+                    #
+                    # This solves catastrophic forgetting at the bond level:
+                    # the bonds for different classes are stored in disjoint
+                    # accumulator slices and never overwrite each other.
+                    sensor_idx = sens.nonzero(as_tuple=True)[0]
+                    if self._teach_bond_sum is not None and len(sensor_idx) > 0:
+                        self._teach_bond_count[active_class] += 1
+                        count = self._teach_bond_count[active_class].item()
+                        target_dir = teach_c[active_class]
+                        # Vectorized accumulator update for all sensors at once
+                        s_sensors = s[sensor_idx]                   # (n_sens, d)
+                        s_norms = s_sensors.norm(dim=-1)
+                        valid = s_norms > 1e-6
+                        if valid.any():
+                            # outer(target_dir, s_j) for each sensor j
+                            outers = torch.einsum('d,je->jde',
+                                                  target_dir, s_sensors)  # (n_sens, d, d)
+                            self._teach_bond_sum[active_class, sensor_idx] += outers
+                        # Write the mean to actual bond matrix
+                        # (do this every step, cheap relative to dynamics)
+                        if count >= 1:
+                            mean_bonds = (self._teach_bond_sum[active_class, sensor_idx]
+                                          / count)
+                            self.C[t0 + active_class, sensor_idx] = mean_bonds
+
+                    # The readout is the clean sensor→teach mean accumulator
+                    # above. (Additive interior→teach bonds were removed: over
+                    # thousands of steps they grew via += and dominated the
+                    # normalized sensor bonds, polluting the discriminative
+                    # readout.) Inactive classes are untouched here.
+
+            # PATHWAY 3: Sensor → Interior bonds (input pathway)
+            # Sensors are pinned, so their bonds TO interior should strengthen
+            # when the interior oscillator's valence benefits from sensor input.
+            # This happens naturally in Pathway 1 since sensors are alive senders.
+
+            # VECTORIZED over ALL interior nodes (was capped at first 50, which
+            # silently left every node beyond 50 — i.e. nearly the whole field at
+            # n_max=1800 with growth — without the self-coupling that reshapes the
+            # energy landscape and confines dynamics against catastrophic
+            # forgetting). The physics must scale with the field. Bitwise
+            # identical to the per-node loop, applied to the full interior set.
+            # Locked consolidated-memory nodes are excluded: their bonds —
+            # including the self-bond diagonal — must stay frozen, so the
+            # autapse update never touches them. VACUUM nodes are also excluded
+            # so the stored self-attractor of a dormant memory is preserved
+            # intact for later cue-triggered recall.
+            _autapse_valid = (interior & (mag > 1e-6) & ~self._class_locked
+                              & (self.state_id != S_VACUUM))
+            _av_idx = _autapse_valid.nonzero(as_tuple=True)[0]
+            if len(_av_idx) > 0:
+                _s_v = s[_av_idx]                                   # (k, d)
+                _outers = torch.einsum('kd,ke->kde', _s_v, _s_v)    # (k, d, d)
+                _denom = (mag[_av_idx] ** 2 + 1e-8).view(-1, 1, 1)
+                self.C[_av_idx, _av_idx] += lr * 0.1 * _outers / _denom
+                self.C[_av_idx, _av_idx] *= (1.0 - decay * 0.5)
+
+            # Prune weak bonds, enforce budget
+            self._prune_bonds()
+
+    def _prune_bonds(self):
+        """Prune weak bonds and enforce per-oscillator budget."""
+        with torch.no_grad():
+            n = self.n_max
+            alive = self.alive_mask
+            sens = self._is_sensory
+            teach = self._is_teaching
+            cr = self.crystallized()
+            locked = self._class_locked
+
+            # Norm of each bond
+            tn = self.C.norm(dim=(-2, -1))
+
+            # Kill very weak bonds — EXCEPT bonds touching locked osc
+            # (those represent consolidated class memory; never erase them).
+            weak = tn < 0.02
+            locked_rows = locked.unsqueeze(1).expand(n, n)
+            locked_cols = locked.unsqueeze(0).expand(n, n)
+            # Also protect teaching-slot rows from weak pruning so that
+            # the readout bonds C[teach_c, sensor] persist even if some
+            # individual sensor bonds are below threshold.
+            teach_rows = teach.unsqueeze(1).expand(n, n)
+            weak = weak & ~(locked_rows | locked_cols | teach_rows)
+            self.C[weak] = 0.0
+
+            # Budget: limit total incoming bond strength per oscillator
+            recv_total = tn.sum(dim=1)
+            state_alpha = self._alpha_of_current_state({})
+            n_alive = alive.sum().clamp(min=1).float()
+            budget_per_osc = 0.5 * state_alpha * n_alive
+
+            # Teaching slots get extra budget (readout must persist)
+            budget_per_osc = torch.where(teach, budget_per_osc * 3.0, budget_per_osc)
+            # Crystallized: 2x
+            budget_per_osc = torch.where(cr, budget_per_osc * 2.0, budget_per_osc)
+            # Class-locked: 10x (effectively unbounded — consolidated memory)
+            budget_per_osc = torch.where(locked, budget_per_osc * 10.0, budget_per_osc)
+
+            over_budget = (recv_total > budget_per_osc) & alive
+            if over_budget.any():
+                scale_factor = budget_per_osc / recv_total.clamp(min=1e-6)
+                scale_factor = torch.where(over_budget, scale_factor,
+                                           torch.ones_like(scale_factor))
+                self.C.mul_(scale_factor.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1))
+
+            # Rebuild mask
+            tn = self.C.norm(dim=(-2, -1))
+            self.C_mask = tn > 0.02
+            # MASK SEMANTICS: C_mask[i, j] = True means "i receives from j"
+            # (because C[i,j] @ s[j] contributes to drive of oscillator i)
+            #
+            # Sensors don't RECEIVE (they're pinned inputs)
+            self.C_mask[sens, :] = False
+            # Teaching doesn't SEND (nobody receives FROM teaching)
+            # C_mask[:, teach] = False means no oscillator receives from teaching
+            self.C_mask[:, teach] = False
+            # Teaching DOES receive (interior -> teaching is the readout pathway)
+            # C_mask[teach, :] stays as-is (determined by bond strength > threshold)
+
+    def _competitive_c_learning(self, input_sig=None, lr_c=0.01):
+        """
+        Competitive learning for c_i vectors: active oscillators drift their
+        identity toward the current input signature, making them specialize.
+        This creates input-dependent resonance for the gain modulation.
+        """
+        if input_sig is None:
+            return
+        with torch.no_grad():
+            interior = self.alive_mask & ~self._is_sensory & ~self._is_teaching
+            if not interior.any():
+                return
+            cr = self.crystallized()
+            # Only non-crystallized, non-locked interior osc can adapt
+            plastic = interior & ~cr & ~self._class_locked
+            if not plastic.any():
+                return
+            
+            # Find the top-k most active oscillators (winners)
+            mag = self.state_magnitude()
+            plastic_idx = plastic.nonzero(as_tuple=True)[0]
+            plastic_mags = mag[plastic_idx]
+            n_winners = min(10, len(plastic_idx))  # top 10 winners adapt
+            if n_winners == 0:
+                return
+            _, top_k = plastic_mags.topk(n_winners)
+            winner_idx = plastic_idx[top_k]
+            
+            # Winners drift c_i toward input signature
+            input_dir = input_sig / input_sig.norm().clamp(min=1e-6)
+            for idx in winner_idx:
+                # Blend c_i toward input direction (small step)
+                new_c = (1.0 - lr_c) * self.c[idx] + lr_c * input_dir
+                self.c[idx] = new_c / new_c.norm().clamp(min=1e-6)
+
+    def _identity_drift(self, lr=0.015):
+        """
+        FIX 3: Crystallization requires SUSTAINED high valence, not just drift.
+        Only oscillators with consistently high valence drift toward golden.
+        """
+        with torch.no_grad():
+            V, _ = self._valence_per_osc()
+            interior = self.alive_mask & ~self._is_sensory & ~self._is_teaching
+            cr = self.crystallized()
+            target = interior & ~cr & ~self._class_locked
+
+            if not target.any():
+                return
+
+            # Update valence accumulator (running average)
+            self._valence_accumulator[target] = (
+                0.95 * self._valence_accumulator[target] + 0.05 * V[target]
+            )
+            self._valence_count[target] += 1
+
+            # Only drift oscillators with ABOVE-THRESHOLD sustained valence
+            mean_val = self._valence_accumulator / self._valence_count.clamp(min=1)
+            high_valence = (mean_val > self._crystallization_threshold * 0.5) & target
+
+            if not high_valence.any():
+                return
+
+            # Drift strength proportional to valence (normalized)
+            v = V[high_valence].clone()
+            v_range = v.max() - v.min()
+            if v_range > 1e-6:
+                v = (v - v.min()) / v_range
+            else:
+                v = torch.ones_like(v) * 0.5
+
+            pull = lr * v
+            hv_idx = high_valence.nonzero(as_tuple=True)[0]
+            self.theta[hv_idx] = self.theta[hv_idx] + pull * (THETA_G - self.theta[hv_idx])
+            self.S[hv_idx] = self.S[hv_idx] + pull * (S_PHI - self.S[hv_idx])
+
+            # Check for new crystallizations
+            newly = self.crystallized() & target
+            if newly.any():
+                self.crystallization_events += int(newly.sum())
+
+    def _contradiction(self):
+        """
+        Field contradiction signal — drives Phantom birth and emergent growth.
+        Returns value in [0, 1].
+
+        Two sub-signals, combined as max:
+          1. Low mean valence (field can't satisfy current pattern)
+          2. High valence variance (osc disagree about the pattern)
+
+        Note: previously included a teach-slot magnitude sub-signal, but
+        teach magnitudes are only pinned DURING the relaxation loop. By
+        the time _contradiction() is called (after experience() returns),
+        teach magnitudes have decayed back to ~0, making that signal a
+        useless constant ~0.98. Removed.
+        """
+        V, _ = self._valence_per_osc()
+        interior = self.alive_mask & ~self._is_sensory & ~self._is_teaching
+        if int(interior.sum()) < 3:
+            return 0.0
+        vi = V[interior]
+
+        # 1. Mean valence — V is in roughly [-1, 1]; map to [0, 1] where
+        #    1.0 = max contradiction (very negative V), 0.0 = no contradiction.
+        #    A well-trained field should have V slightly positive → mean_c ~ 0.4.
+        #    A struggling field has V near 0 or negative → mean_c ~ 0.5-1.0.
+        mean_c = float((1.0 - vi.mean().clamp(-1, 1)) / 2.0)
+
+        # 2. Variance — high std means osc are at very different operating
+        #    points (the field hasn't found consensus). Scale so std=0 → 0,
+        #    std=0.5 → 1.0 (anything above 0.5 std means severe disagreement).
+        var_c = float((vi.std() * 2.0).clamp(0, 1))
+
+        return max(mean_c, var_c)
+
+    def _phantom_birth(self, n_spawn, target_teach=None):
+        """
+        Spawn PHANTOM oscillators into dormant slots.
+        FIX 5: More aggressive spawning with better initialization.
+        """
+        with torch.no_grad():
+            # Interior neurogenesis populates dormant INTERIOR slots only —
+            # never dormant teach slots (reserved category capacity) or sensory
+            # slots. Otherwise a growing interior would cannibalize the category
+            # reserve and starve emergent category birth.
+            dormant = (~self.alive_mask & ~self._is_teaching
+                       & ~self._is_sensory).nonzero(as_tuple=True)[0]
+            if len(dormant) == 0:
+                return 0
+            k = min(n_spawn, len(dormant))
+            slots = dormant[:k]
+
+            # Initialize near golden ratio for high base α
+            self.theta[slots] = THETA_G + torch.randn(k, device=self.device) * 0.3
+            self.S[slots]     = S_PHI + torch.randn(k, device=self.device) * 0.2
+            self.f[slots]     = torch.rand(k, device=self.device) * 6.0 + 3.0  # near harmonics
+            self.N[slots]     = torch.rand(k, device=self.device) * 6.0 + 3.0
+            self.a0[slots]    = torch.rand(k, device=self.device) * 0.05 + 0.92
+            self.age[slots]   = 0
+
+            # Initialize state with small random + bias toward active region
+            interior = self.alive_mask & ~self._is_sensory & ~self._is_teaching
+            if interior.any():
+                mean_s = self.s[interior].mean(0)
+                init_s = mean_s.unsqueeze(0) * 0.3 + torch.randn(k, self.d, device=self.device) * 0.1
+            else:
+                init_s = torch.randn(k, self.d, device=self.device) * 0.1
+
+            self.s[slots] = init_s
+
+            # Coherence direction
+            cr = torch.randn(k, self.d, device=self.device)
+            self.c[slots] = cr / cr.norm(dim=1, keepdim=True).clamp(min=1e-8)
+
+            # Connect sparsely to existing interior oscillators
+            active_interior = interior.nonzero(as_tuple=True)[0]
+            if len(active_interior) > 0:
+                n_connect = min(5, len(active_interior))
+                for s_idx in slots:
+                    targets = active_interior[torch.randperm(len(active_interior))[:n_connect]]
+                    for t_idx in targets:
+                        # Small random bond
+                        self.C[s_idx, t_idx] = torch.randn(self.d, self.d, device=self.device) * 0.03
+                        self.C[t_idx, s_idx] = torch.randn(self.d, self.d, device=self.device) * 0.03
+
+            # Connect to teaching slot if specified
+            if target_teach is not None:
+                for s_idx in slots:
+                    self.C[target_teach, s_idx] = torch.randn(self.d, self.d, device=self.device) * 0.05
+
+            self.alive_mask[slots] = True
+            self.state_id[slots] = S_PHANTOM
+            self.births += k
+
+            # Update bond mask
+            tn = self.C.norm(dim=(-2, -1))
+            self.C_mask = tn > 0.02
+
+            return k
+
+    def _age_and_cull(self):
+        """Age oscillators and cull low-energy ones."""
+        with torch.no_grad():
+            interior = self.alive_mask & ~self._is_sensory & ~self._is_teaching
+            cr = self.crystallized()
+            self.age[interior] += 1
+
+            # Old + low energy + not crystallized + NOT class-locked: candidate
+            # for forgetting. But forgetting is GRACEFUL — a node that still
+            # carries a learned identity (a non-trivial self-attractor) is
+            # demoted to the VACUUM reservoir, not erased: it fades to a dormant,
+            # low-energy trace whose bonds are frozen (see _learn_bonds) and can
+            # be recalled later when a matching cue returns. Only nodes with no
+            # learned content (empty self-bond) are actually culled/freed.
+            E = self.energy()
+            old = self.age > 200
+            low_E = E < 0.001
+            cullable = interior & old & low_E & ~cr & ~self._class_locked
+            cull_idx = cullable.nonzero(as_tuple=True)[0]
+
+            if len(cull_idx) > 0:
+                autapse = self.C[cull_idx, cull_idx].reshape(len(cull_idx), -1)
+                has_memory = autapse.norm(dim=1) > 1e-4
+                demote_idx = cull_idx[has_memory]
+                dead_idx   = cull_idx[~has_memory]
+
+                if len(demote_idx) > 0:
+                    # Demote to the dormant vacuum reservoir (forgotten, not lost).
+                    self.state_id[demote_idx] = S_VACUUM
+                    self.age[demote_idx] = 0     # don't immediately re-cull
+                    self.deaths += 0             # demotion is not a death
+
+                if len(dead_idx) > 0:
+                    self.alive_mask[dead_idx] = False
+                    self.C[dead_idx] = 0.0
+                    self.C[:, dead_idx] = 0.0
+                    self.C_mask[dead_idx] = False
+                    self.C_mask[:, dead_idx] = False
+                    self.deaths += int(len(dead_idx))
+
+    def start_emergent(self):
+        """Put ALL category (teach) slots to sleep so the brain begins with NO
+        categories. Categories then come into being only via birth_category when
+        genuinely novel input arrives — nothing is pre-assigned. Call once, right
+        after construction, for an emergent-category brain."""
+        with torch.no_grad():
+            if self.t_start is None:
+                return
+            self.alive_mask[self.t_start:self.t_end] = False
+            self._active_categories = 0
+
+    def birth_category(self, input_sig=None):
+        """EMERGENT CATEGORY BIRTH. When the brain meets something that fits no
+        existing category, a new one comes into being: the next dormant teach
+        slot is woken, its identity direction c is tuned toward the pattern that
+        birthed it (so the category is 'about' what it first saw), and it becomes
+        a live readout. If the dormant reserve is exhausted, grow_capacity is
+        NOT enough (it grows interior, not teach) — we simply report -1 so the
+        caller can grow the teach region. Returns the new category index
+        (0-based within the teach block), or -1 if none free.
+
+        This is born-when-needed self-organization, the same pattern the interior
+        uses via _phantom_birth — applied to categories. No pre-assignment."""
+        with torch.no_grad():
+            if self.t_start is None:
+                return -1
+            teach_idx = torch.arange(self.t_start, self.t_end, device=self.device)
+            dormant = teach_idx[~self.alive_mask[teach_idx]]
+            if len(dormant) == 0:
+                return -1
+            slot = int(dormant[0].item())
+            cat = slot - self.t_start
+            self.alive_mask[slot] = True
+            # Tune the new category's identity to the pattern that birthed it, so
+            # it is selective for that pattern from the moment it exists.
+            if input_sig is not None:
+                sig = input_sig.to(self.device).reshape(-1)
+                n = sig.norm()
+                if n > 1e-6:
+                    self.c[slot] = sig / n
+            self._active_categories = max(getattr(self, '_active_categories', 0), cat + 1)
+            return cat
+
+    def concept_relations(self, top_k=3, active_only=True):
+        """Read the brain's learned concept-relation web: for each concept,
+        the top_k other concepts it most relates to (by co-activation). This is
+        the 'understanding' structure — what the brain thinks goes with what —
+        learned unsupervised from its own perception, separate from the readout.
+        Returns {concept_index: [(other_index, strength), ...]}."""
+        if self._concept_bonds is None:
+            return {}
+        W = self._concept_bonds
+        rels = {}
+        n = W.shape[0]
+        for i in range(n):
+            if active_only and not bool(self.alive_mask[self.t_start + i]):
+                continue
+            row = W[i].clone()
+            order = torch.argsort(row, descending=True)
+            picks = [(int(j), float(row[j])) for j in order[:top_k] if float(row[j]) > 1e-6]
+            if picks:
+                rels[i] = picks
+        return rels
+
+    def consolidate_class(self, class_id, n_lock=8):
+        """
+        Freeze top-n_lock interior oscillators that drive teaching slot
+        class_id into the highest-α state (HOLOGRAPHIC) + crystallized.
+        After consolidation, these oscillators are permanent reference
+        nodes for class_id — they never decay, never compete, never die.
+
+        Call this after each phase of training to lock in class memory.
+        """
+        with torch.no_grad():
+            if self.t_start is None or class_id >= self.n_classes:
+                return 0
+            teach_idx = self.t_start + class_id
+            interior = self.alive_mask & ~self._is_sensory & ~self._is_teaching
+            if not interior.any():
+                return 0
+
+            # Bond strength from each interior osc into this class's teach slot
+            strengths = self.C[teach_idx].norm(dim=(-2, -1))   # (n_max,)
+            # Already-locked candidates excluded; also exclude crystallized
+            # locked-to-other-class to avoid stealing
+            candidates = interior & ~self._class_locked
+            if not candidates.any():
+                return 0
+            cand_strengths = torch.where(candidates, strengths,
+                                          torch.zeros_like(strengths))
+            n_take = min(n_lock, int(candidates.sum().item()))
+            if n_take == 0:
+                return 0
+            _, top_indices = cand_strengths.topk(n_take)
+
+            locked_count = 0
+            for idx in top_indices:
+                if cand_strengths[idx] < 1e-4:
+                    continue                # don't lock osc with no real bond
+                # Declare this oscillator a permanent reference node for the
+                # class. It moves to the highest-preservation state and is
+                # frozen via _class_locked (which every decay/dynamics path
+                # already honors). We do NOT back-date the valence accumulator
+                # to fake crystallized() — locking is what preserves it, and
+                # crystallized() stays an honest measure of earned valence.
+                self.theta[idx] = THETA_G
+                self.S[idx] = S_PHI
+                self.state_id[idx] = S_HOLOGRAPHIC
+                self._class_locked[idx] = True
+                self._locked_class[idx] = class_id
+                self._preservation[idx] = 1.0   # freshly consolidated → fully sticky
+                self.crystallization_events += 1
+                locked_count += 1
+            return locked_count
+
+    def grow_capacity(self, n_grow=200):
+        """
+        EMERGENT NEUROGENESIS at the tensor level.
+
+        When dormant slots are exhausted AND contradiction stays high, the
+        field itself signals it needs more substrate. This method extends
+        every per-oscillator tensor by n_grow new slots, all marked dormant
+        (alive_mask=False) and ready for _phantom_birth to populate.
+
+        This is the analog of biological neurogenesis: when the existing
+        cellular substrate cannot accommodate a new pattern, new cells
+        are generated. Memory of existing patterns is preserved exactly
+        because we EXTEND tensors (concatenate new zeros), never reindex.
+
+        Returns the new n_max after growth.
+
+        Memory cost: bond tensor C grows as O((n_max + n_grow)²). At
+        d=32, growing from 400 → 600 adds ~330 MB.
+        """
+        with torch.no_grad():
+            dev = self.device
+            old_n = self.n_max
+            new_n = old_n + n_grow
+            d = self.d
+
+            # ── 1-D per-osc tensors (most attributes)
+            scalar_attrs_zero = [
+                'age', 'proper_time', 'local_v2c2', '_valence_accumulator',
+                '_valence_count',
+            ]
+            scalar_attrs_one = ['gamma', '_preservation']  # both init to 1.0
+            scalar_attrs_half = ['local_T']  # init 0.5
+            scalar_attrs_neg1 = ['local_w']  # init -1.0
+            scalar_attrs_0_1 = ['vacuum_energy']  # init 0.1
+            bool_attrs = ['alive_mask', '_is_sensory', '_is_teaching', '_class_locked']
+            long_attrs_neg1 = ['_locked_class']
+            long_attrs_classical = ['state_id']
+
+            # Random-init scalars (need same distribution as init)
+            random_attrs = {
+                'theta':  ('randn', 0.8, THETA_G),
+                'S':      ('randn', 0.5, S_PHI),
+                'f':      ('rand',  8.0, 1.0),
+                'N':      ('rand',  8.0, 1.0),
+                'a0':     ('rand',  0.15, 0.85),
+            }
+
+            for attr in scalar_attrs_zero:
+                if not hasattr(self, attr):
+                    continue
+                cur = getattr(self, attr)
+                if cur is None:
+                    continue
+                add = torch.zeros(n_grow, dtype=cur.dtype, device=dev)
+                setattr(self, attr, torch.cat([cur, add], dim=0))
+
+            for attr in scalar_attrs_one:
+                cur = getattr(self, attr)
+                add = torch.ones(n_grow, dtype=cur.dtype, device=dev)
+                setattr(self, attr, torch.cat([cur, add], dim=0))
+
+            for attr in scalar_attrs_half:
+                cur = getattr(self, attr)
+                add = torch.full((n_grow,), 0.5, dtype=cur.dtype, device=dev)
+                setattr(self, attr, torch.cat([cur, add], dim=0))
+
+            for attr in scalar_attrs_neg1:
+                cur = getattr(self, attr)
+                add = torch.full((n_grow,), -1.0, dtype=cur.dtype, device=dev)
+                setattr(self, attr, torch.cat([cur, add], dim=0))
+
+            for attr in scalar_attrs_0_1:
+                cur = getattr(self, attr)
+                add = torch.full((n_grow,), 0.1, dtype=cur.dtype, device=dev)
+                setattr(self, attr, torch.cat([cur, add], dim=0))
+
+            for attr in bool_attrs:
+                if not hasattr(self, attr):
+                    continue
+                cur = getattr(self, attr)
+                add = torch.zeros(n_grow, dtype=torch.bool, device=dev)
+                setattr(self, attr, torch.cat([cur, add], dim=0))
+
+            for attr in long_attrs_neg1:
+                cur = getattr(self, attr)
+                add = torch.full((n_grow,), -1, dtype=torch.long, device=dev)
+                setattr(self, attr, torch.cat([cur, add], dim=0))
+
+            for attr in long_attrs_classical:
+                cur = getattr(self, attr)
+                add = torch.full((n_grow,), S_CLASSICAL, dtype=torch.long, device=dev)
+                setattr(self, attr, torch.cat([cur, add], dim=0))
+
+            for attr, spec in random_attrs.items():
+                cur = getattr(self, attr)
+                dist, scale, offset = spec
+                if dist == 'randn':
+                    add = torch.randn(n_grow, device=dev) * scale + offset
+                else:
+                    add = torch.rand(n_grow, device=dev) * scale + offset
+                setattr(self, attr, torch.cat([cur, add], dim=0))
+
+            # ── 2-D per-osc state tensors  (n_max, d)
+            for attr in ['s', 's_imag', 'future_prediction', '_prev_prediction']:
+                if not hasattr(self, attr):
+                    continue
+                cur = getattr(self, attr)
+                if cur is None:
+                    continue
+                add = torch.zeros(n_grow, d, device=dev)
+                setattr(self, attr, torch.cat([cur, add], dim=0))
+
+            # c: unit-norm random directions
+            cur = self.c
+            cr = torch.randn(n_grow, d, device=dev)
+            cr = cr / cr.norm(dim=1, keepdim=True).clamp(min=1e-8)
+            self.c = torch.cat([cur, cr], dim=0)
+
+            # phase_vec: random phase angles → (cos, sin)
+            ph = torch.rand(n_grow, device=dev) * 2 * math.pi
+            new_pv = torch.stack([torch.cos(ph), torch.sin(ph)], dim=1)
+            self.phase_vec = torch.cat([self.phase_vec, new_pv], dim=0)
+
+            # ── force_channels (n_max, 4)
+            if hasattr(self, 'force_channels') and self.force_channels is not None:
+                add = torch.zeros(n_grow, 4, device=dev)
+                self.force_channels = torch.cat([self.force_channels, add], dim=0)
+
+            # ── scale_memory (n_max, 4, d), s_branches (n_max, 4, d), branch_weights (n_max, 4)
+            if hasattr(self, 'scale_memory') and self.scale_memory is not None:
+                add = torch.zeros(n_grow, 4, d, device=dev)
+                self.scale_memory = torch.cat([self.scale_memory, add], dim=0)
+            if hasattr(self, 's_branches') and self.s_branches is not None:
+                add = torch.randn(n_grow, 4, d, device=dev) * 0.01
+                self.s_branches = torch.cat([self.s_branches, add], dim=0)
+            if hasattr(self, 'branch_weights') and self.branch_weights is not None:
+                add = torch.ones(n_grow, 4, device=dev) * 0.25
+                self.branch_weights = torch.cat([self.branch_weights, add], dim=0)
+
+            # ── _E_history (n_max, 8)
+            if hasattr(self, '_E_history') and self._E_history is not None:
+                add = torch.zeros(n_grow, 8, device=dev)
+                self._E_history = torch.cat([self._E_history, add], dim=0)
+
+            # ── _prev_s, _prev_mag — may be None
+            if hasattr(self, '_prev_s') and self._prev_s is not None:
+                add = torch.zeros(n_grow, d, device=dev)
+                self._prev_s = torch.cat([self._prev_s, add], dim=0)
+            if hasattr(self, '_prev_mag') and self._prev_mag is not None:
+                add = torch.zeros(n_grow, device=dev)
+                self._prev_mag = torch.cat([self._prev_mag, add], dim=0)
+
+            # ── BOND TENSORS (the big ones)
+            # C is (old_n, old_n, d, d). Need (new_n, new_n, d, d).
+            # Copy existing bonds into top-left corner, new slots get zero bonds.
+            new_C = torch.zeros(new_n, new_n, d, d, device=dev)
+            new_C[:old_n, :old_n] = self.C
+            self.C = new_C
+
+            new_Cmask = torch.zeros(new_n, new_n, dtype=torch.bool, device=dev)
+            new_Cmask[:old_n, :old_n] = self.C_mask
+            self.C_mask = new_Cmask
+
+            # _teach_bond_sum is (n_classes, n_max, d, d) — only n_max axis grows
+            if hasattr(self, '_teach_bond_sum') and self._teach_bond_sum is not None:
+                n_cls = self._teach_bond_sum.shape[0]
+                add = torch.zeros(n_cls, n_grow, d, d, device=dev)
+                self._teach_bond_sum = torch.cat([self._teach_bond_sum, add], dim=1)
+
+            # ── Update n_max — this is the contract that everything else
+            # relies on (consolidate, phantom_birth, _learn_bonds, etc.)
+            self.n_max = new_n
+
+            return new_n
+
+    def _update_neuromodulators(self):
+        """Update neuromodulator levels from independent brain signals each tick.
+        Each modulator has its own driving source:
+          ACh  — sensory novelty + internal contradiction (plasticity gate)
+          DA   — temporal Δvalence = reward prediction error (credit signal)
+          NA   — spatial valence variance + sudden change (arousal / SNR)
+          Sero — sustained low contradiction, tonic slow-timescale (stability)
+        When neuro_enabled=False, returns immediately — all levels stay 1.0."""
+        if not self.neuro_enabled:
+            return
+
+        V, _ = self._valence_per_osc()
+        interior = self.alive_mask & ~self._is_sensory & ~self._is_teaching
+        if int(interior.sum()) < 3:
+            return
+        vi = V[interior]
+
+        mean_v   = float(vi.mean())
+        vi_std   = float(vi.std())
+        mean_c   = float((1.0 - vi.mean().clamp(-1, 1)) / 2.0)
+        var_c    = min(1.0, vi_std * 2.0)
+        contradiction = max(mean_c, var_c)
+
+        # --- ACh: sensory novelty (independent) + internal contradiction ---
+        # Novelty = how surprising THIS input is vs the typical input deviation
+        # (ratio centered at 1.0). >1 → novel → +ACh; <1 → familiar → −ACh.
+        # This is a real per-input signal, not a saturated running level.
+        surprise = float(getattr(self, '_input_surprise', 1.0))
+        novelty_signal = math.tanh((surprise - 1.0) * 1.5)  # ∈(-1,1), 0 at typical
+        ach_drive = (contradiction - 0.45) + 0.5 * novelty_signal
+        ach_target = 1.0 + 0.5 * math.tanh(ach_drive * 4)
+        self._neuro['ach'] = float(max(0.5, min(1.5,
+            0.9 * self._neuro['ach'] + 0.1 * ach_target)))
+
+        # --- DA: class prediction error + Δvalence (closed-loop RPE) ---
+        # Biological DA fires on unexpected outcomes:
+        #   wrong prediction → DA burst → bonds potentiate (learn harder from mistake)
+        #   correct prediction → DA dip → bonds stable (consolidate what works)
+        # pred_error=1.0 when wrong, 0.0 when correct, 0.5 when no label (inference)
+        delta_v = mean_v - self._mean_valence_prev
+        self._mean_valence_prev = mean_v
+        pred_error = 1.0 - float(getattr(self, '_prediction_correct', 0.5))
+        da_from_error   = 0.3 * (pred_error - 0.5)   # wrong→+0.15, correct→-0.15
+        da_from_valence = 0.2 * math.tanh(delta_v * 10)
+        self._neuro['da'] = float(max(0.7, min(1.3,
+            1.0 + da_from_error + da_from_valence)))
+        # NOTE: this sets the GLOBAL DA *level*. _learn_bonds applies it
+        # PER-OSCILLATOR through an eligibility trace (active units get the
+        # credit), so DA is a genuine three-factor credit signal — not a
+        # uniform learning-rate multiplier.
+
+        # --- NA: spatial field variance + temporal surprise ---
+        # Spatial: high vi.std() → heterogeneous field → uncertain → higher NA
+        # Temporal: |Δvalence| → sudden change regardless of sign → brief NA surge
+        # Together they sharpen the gain contrast and routing temperature.
+        na_spatial  = 1.0 + 0.5 * math.tanh((vi_std - 0.2) * 5)
+        na_surprise = 0.3 * math.tanh(abs(delta_v) * 15)
+        na_target   = na_spatial + na_surprise
+        self._neuro['na'] = float(max(0.5, min(2.0,
+            0.85 * self._neuro['na'] + 0.15 * na_target)))
+
+        # --- Serotonin: tonic, slow-timescale stability signal ---
+        # Rises only with sustained low contradiction (τ ≈ 50 ticks at 0.98 decay).
+        # High sero → less dissipation (longer memory) + easier crystallization.
+        sero_target = 1.0 + 0.4 * max(0.0, math.tanh((0.45 - contradiction) * 5))
+        self._neuro['sero'] = float(max(1.0, min(1.4,
+            0.98 * self._neuro['sero'] + 0.02 * sero_target)))
+
+
+# Attach learning methods
+for _m in ('_valence_per_osc', '_alpha_of_current_state', '_learn_bonds',
+           '_prune_bonds', '_identity_drift', '_competitive_c_learning',
+           '_contradiction', '_phantom_birth', '_age_and_cull',
+           'consolidate_class', 'grow_capacity', '_update_neuromodulators',
+           'start_emergent', 'birth_category', 'concept_relations'):
+    setattr(UERFField, _m, getattr(UERFLearning, _m))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PART 5 — EXPERIENCE LOOP (train + predict)
+# ═══════════════════════════════════════════════════════════════════════════════
+class UERFExperience:
+    """Mixin: experience (training), rehearsal, and prediction."""
+
+    def experience(self, x, teaching_vector=None, n_relax=6, learn=True,
+                   bond_chunk=256, domain_lo=None, domain_hi=None):
+        """
+        Present one input pattern to the brain.
+        x: (n_sensory,) normalized input vector.
+        teaching_vector: (n_classes,) one-hot target (or None for inference).
+        n_relax: number of dynamics ticks per experience.
+        learn: whether to update bonds.
+        domain_lo/domain_hi: restrict the closed-loop prediction-error check
+            (which drives DA) to the current domain's slot range, so on a
+            multi-domain checkpoint a foreign slot can't flip the prediction to
+            'wrong' and pollute the DA signal. Defaults to the full slot range.
+        """
+        with torch.no_grad():
+            self.experience_count += 1
+            n, d = self.n_max, self.d
+
+            # Device safety: ensure input is on same device as model
+            x = x.to(self.device)
+            if teaching_vector is not None:
+                teaching_vector = teaching_vector.to(self.device)
+
+            x = x / x.norm().clamp(min=1e-6)
+
+            if self._input_running_mean is None:
+                self._input_running_mean = x.clone()
+            else:
+                ema_rate = 0.01  # slow adaptation
+                self._input_running_mean = (
+                    (1 - ema_rate) * self._input_running_mean + ema_rate * x
+                )
+                diff = (x - self._input_running_mean).norm()
+                # surprise BEFORE updating var: how this input's deviation compares
+                # to the typical (running) deviation. 1.0 = typical, >1 = novel.
+                self._input_surprise = float(
+                    (diff ** 2) / self._input_running_var.clamp(min=1e-6))
+                self._input_running_var = (
+                    0.99 * self._input_running_var + 0.01 * diff ** 2
+                )
+
+            # ── Closed-loop prediction error (drives DA) ───────────────────────
+            # Before learning, read the brain's GENUINE belief about THIS input:
+            # a non-destructive eval_predict relaxes the field from the current
+            # consolidated state (teach slots zeroed, bond-driven) and restores
+            # everything afterward. Comparing that prediction to the true label
+            # gives reward-prediction-error: wrong → DA burst → bonds potentiate
+            # harder; right → DA dip → consolidate. Must run BEFORE the decay /
+            # sensory-injection below mutate self.s, so it matches a standalone
+            # eval exactly. neuro_enabled gates it — zero overhead when off.
+            if (learn and self.neuro_enabled and teaching_vector is not None
+                    and self.t_start is not None):
+                pre_class, pre_scores = self.eval_predict(
+                    x, n_relax=n_relax, return_scores=True,
+                    domain_lo=domain_lo, domain_hi=domain_hi)
+                if pre_scores is not None:
+                    true_class = int(teaching_vector.argmax().item())
+                    self._prediction_correct = float(pre_class == true_class)
+                    # ── UNDERSTANDING: concept-to-concept relations ────────────
+                    # Concepts that co-activate in the brain's OWN perception
+                    # (pre_scores, before it's told the answer) become linked —
+                    # unsupervised "what relates to what". A '3' that also lights
+                    # up '8' teaches the brain 3~8. This builds a relational web
+                    # (self._concept_bonds) SEPARATE from the classifier readout,
+                    # so it adds comprehension without disturbing accuracy.
+                    if self._concept_bonds is not None:
+                        ps = pre_scores.detach().clamp(min=0)
+                        ps = ps / ps.max().clamp(min=1e-6)          # [0,1]
+                        ps = torch.where(ps > 0.5, ps, torch.zeros_like(ps))
+                        co = torch.outer(ps, ps)
+                        co.fill_diagonal_(0.0)
+                        self._concept_bonds = (0.999 * self._concept_bonds
+                                               + 0.001 * co)
+                else:
+                    self._prediction_correct = 0.5
+            else:
+                # inference, or neuro off, or no label → neutral (DA stays ~1.0)
+                self._prediction_correct = 0.5
+
+            # This creates SPARSE, PATTERN-SPECIFIC representations:
+            # - Each input activates a DIFFERENT subset of interior oscillators
+            # - Oscillators whose identity (c) aligns with the input get boosted
+            # - Oscillators misaligned with input get suppressed more
+            # This is the key to preventing catastrophic forgetting:
+            # A-pattern oscillators form bonds to teach[0],
+            # B-pattern oscillators form bonds to teach[1],
+            # and they don't interfere because they're different oscillators.
+            interior = self.alive_mask & ~self._is_sensory & ~self._is_teaching
+            if interior.any():
+                cr = self.crystallized()
+
+                # Input-dependent gating: how much does this input
+                # "resonate" with each interior oscillator's identity?
+                # Use the sensory input projected into d-space
+                if self.input_dim is not None:
+                    # Compute input signature in d-space
+                    # (weighted sum of sensory c vectors)
+                    input_sig = (x.unsqueeze(-1) * self.c[:self.input_dim]).sum(0)  # (d,)
+                    input_sig = input_sig / input_sig.norm().clamp(min=1e-6)
+                    # Resonance: how aligned is each interior osc's c with input?
+                    resonance = (self.c * input_sig.unsqueeze(0)).sum(-1)  # (n,)
+                    # Soft gate: resonant oscillators decay less, non-resonant decay more
+                    # resonance ∈ [-1, 1]; map to gate ∈ [0.3, 1.0]
+                    gate = 0.3 + 0.7 * (resonance.clamp(-1, 1) + 1) / 2  # ∈ [0.3, 1.0]
+                else:
+                    gate = torch.ones(self.n_max, device=self.device)
+
+                # Eq 5 (Master Continuous) dissipation — STATE-SPECIFIC: each
+                # regime uses its own loss law (Holographic exp(−S_ent)≈0,
+                # Harmonic Q-factor, Thermal exp(E_a/kT), Phantom |1+w|, …).
+                # Build current routing ctx so the per-state dissipation drivers
+                # (holo fidelity, scale coherence, proper-time) are fresh.
+                _decay_ctx = self._build_routing_ctx()
+                decay_factor = self.eq5_decay_factor(ctx=_decay_ctx)
+                # Apply input-dependent resonance gate (non-resonant decay faster)
+                decay_factor = decay_factor * gate
+                decay_factor = decay_factor.clamp(0.1, 0.99)
+                # UERF PRESERVATION as the FINAL word — crystallized and locked
+                # oscillators are the α≈0.998 information-preservation regime and
+                # must NOT decay. (Order matters: gate runs before these so it
+                # cannot undo them — the bug that made consolidated memory decay.)
+                decay_factor = torch.where(cr,
+                                           torch.ones_like(decay_factor) * 0.98,
+                                           decay_factor)
+                decay_factor = torch.where(self._class_locked,
+                                           torch.ones_like(decay_factor),
+                                           decay_factor)
+
+                self.s[interior] *= decay_factor[interior].unsqueeze(-1)
+
+            # Inject sensory input
+            if self.input_dim is not None:
+                self.s[:self.input_dim] = x.unsqueeze(-1) * self.c[:self.input_dim]
+
+            # Pin teaching signal during learning
+            pin_teach = None
+            if teaching_vector is not None and self.t_start is not None:
+                pin_teach = teaching_vector.unsqueeze(-1) * self.c[self.t_start:self.t_end]
+
+            # Build context once per experience
+            ctx = self._build_routing_ctx()
+
+            # Relax dynamics
+            pin_s = self.s[:self.input_dim].clone() if self.input_dim else None
+            for tick in range(n_relax):
+                self._dynamics_step(ctx, pin_sensory=pin_s,
+                                    pin_teaching=pin_teach,
+                                    bond_chunk=bond_chunk)
+                # Refresh context every other tick for responsiveness
+                if tick % 2 == 1:
+                    ctx = self._build_routing_ctx()
+
+            # Learning phase
+            if learn:
+                # Update neuromodulators FIRST, from the settled post-relaxation
+                # field, so the DA computed from THIS input's prediction error
+                # gates THIS input's bond update (C += lr·ACh·DA·ΔC). If bonds
+                # were learned before DA refreshed, the error on input t would
+                # modulate input t+1 — a one-step credit misassignment.
+                self._update_neuromodulators()
+
+                self._learn_bonds()
+                self._identity_drift()
+
+                # Competitive c_i learning: winners specialize to current input.
+                # resonance gate AND bond structure, so fast drift misaligns
+                # bonds learned earlier in training.
+                if self.input_dim is not None:
+                    input_sig = (x.unsqueeze(-1) * self.c[:self.input_dim]).sum(0)
+                    # Slow interior identity drift so c-vectors stay aligned with
+                    # the bonds learned earlier in training.
+                    self._competitive_c_learning(input_sig=input_sig, lr_c=0.001)
+
+                    # ── Graded consolidation: renew on use, fade on disuse ──────
+                    # A consolidated memory whose identity matches the current
+                    # input is being USED → its preservation renews toward 1. The
+                    # rest of the locked set fades slowly (disuse). When a memory
+                    # fades past the floor it is RELEASED to the vacuum reservoir
+                    # (un-locked, dormant) — forgotten but recallable, since its
+                    # bonds were frozen in vacuum. Consolidation is reversible.
+                    if bool(self._class_locked.any()):
+                        in_n = input_sig / input_sig.norm().clamp(min=1e-6)
+                        res = (self.c * in_n.unsqueeze(0)).sum(-1)        # (n,)
+                        used  = self._class_locked & (res > RECALL_RESONANCE)
+                        faded = self._class_locked & ~used
+                        self._preservation = torch.where(
+                            used, (self._preservation + PRESERVE_RENEW).clamp(max=1.0),
+                            self._preservation)
+                        self._preservation = torch.where(
+                            faded, (self._preservation - PRESERVE_DECAY).clamp(min=0.0),
+                            self._preservation)
+                        release = self._class_locked & (self._preservation <= PRESERVE_FLOOR)
+                        if bool(release.any()):
+                            self._class_locked[release] = False
+                            self._locked_class[release] = -1
+                            self.state_id[release] = S_VACUUM
+
+                # Phantom birth and emergent growth triggers, calibrated to
+                # match the contradiction signal's real range. After the
+                # contradiction recalibration (removed broken teach_c sub-
+                # signal), normal training contradiction sits at 0.4-0.55.
+                # Severe difficulty pushes it higher.
+                contradiction = self._contradiction()
+                refractory = self.experience_count - self._last_birth_step > 50
+
+                # Phantom birth fires when contradiction > 0.5 (above baseline)
+                # ACh modulates threshold: high ACh → lower threshold → birth fires more
+                _ach_birth = self._neuro.get('ach', 1.0)
+                if contradiction > 0.5 / _ach_birth and refractory:
+                    n_spawn = max(1, int(contradiction * 4))   # 2-4 spawns
+
+                    # EMERGENT NEUROGENESIS: when the field is full AND
+                    # contradiction stays elevated, the tensor substrate
+                    # itself signals it needs to expand. The trigger fires
+                    # from internal field dynamics — not a human decision.
+                    #
+                    # Memory preservation: grow_capacity EXTENDS tensors
+                    # (concatenates new zeros). Existing oscillator state
+                    # and bond patterns are bitwise identical after grow.
+                    n_dormant = int((~self.alive_mask).sum().item())
+                    grow_refractory = (self.experience_count -
+                                       getattr(self, '_last_grow_step', -10000)) > 200
+                    # Grow when full AND contradiction is genuinely elevated
+                    if n_dormant == 0 and grow_refractory and contradiction > 0.5 / _ach_birth:
+                        # Grow by 20% of current capacity (min 100 slots)
+                        n_grow = max(100, int(self.n_max * 0.2))
+                        old_n = self.n_max
+                        new_n = self.grow_capacity(n_grow=n_grow)
+                        self._last_grow_step = self.experience_count
+                        # Real osc populate the new slots via _phantom_birth() below
+                        # via _phantom_birth(). births counter tracks them.
+                    born = self._phantom_birth(n_spawn)
+                    if born > 0:
+                        self._last_birth_step = self.experience_count
+
+                # Age and cull every 50 steps
+                if self.experience_count % 50 == 0:
+                    self._age_and_cull()
+
+                # (replay buffer + rehearsal removed — physics defends memory
+                #  alone via crystallization, locking, and disjoint per-class
+                #  teach-bond accumulators)
+
+    def predict(self):
+        """Read out class scores by the framework's Eq 6 VALENCE, not raw
+        magnitude:  V_k = ⟨s_k, R_k⟩ − λ‖s_k − I_k‖²  with reference R_k = identity
+        I_k = the slot's own c_k. Resonance with the class reference minus
+        deviation from it — a loud-but-misaligned slot (spurious cross-class
+        activation) is penalised, unlike plain magnitude. Training-free; no
+        labels, no fitted head, no calibration."""
+        if self.t_start is None:
+            return None
+        s = self.s[self.t_start:self.t_end]
+        c = self.c[self.t_start:self.t_end]
+        align = (s * c).sum(-1)            # ⟨s,R⟩ resonance with class reference
+        dev   = ((s - c) ** 2).sum(-1)     # ‖s−I‖² deviation from identity
+        return align - 0.25 * dev          # Eq 6 valence (λ=0.25, as valence())
+
+    def predict_aware(self):
+        """Self-aware readout: magnitude × holographic quality gate.
+
+        The holographic projector (built from SVD of all teach c-vectors at init)
+        encodes the manifold of genuine class activations. During inference,
+        a teach slot that's activated AND lies on that manifold is more
+        trustworthy than one activated off-manifold (noise, cross-domain bleed).
+
+        This is NOT a class discriminator — the projector is global. It's a
+        per-slot confidence multiplier that keeps magnitude as the carrier:
+
+            score_k = norm_k × (0.5 + 0.5 × holo_alignment_k)
+
+        On-manifold slots get 100% weight; off-manifold slots get 50%.
+        Falls back to plain predict() when no projector is available.
+
+        Calibration: z-score de-bias applied to norms first, same as predict().
+        """
+        if self.t_start is None:
+            return None
+
+        teach_s = self.s[self.t_start:self.t_end]    # (n_classes, d)
+        norms   = teach_s.norm(dim=-1)               # carrier signal
+
+        if self._holo_projector is None:
+            return norms
+
+        # Per-slot holographic alignment: how much of each slot's state vector
+        # lies within the teach manifold (the low-rank subspace of teach c-vectors)?
+        # Formula: dot(P·s, s) / ‖s‖² — scale-invariant measure of on-manifold-ness.
+        norms_raw  = teach_s.norm(dim=-1).clamp(min=1e-8)   # before calibration
+        holo_proj  = teach_s @ self._holo_projector          # (n_classes, d)
+        holo_a     = (holo_proj * teach_s).sum(-1) / (norms_raw ** 2)
+        holo_a     = holo_a.clamp(0.0, 1.0)
+
+        return norms * (0.5 + 0.5 * holo_a)
+
+    def eval_predict(self, x, n_relax=None, bond_chunk=256, return_scores=False,
+                     predict_fn=None, domain_lo=None, domain_hi=None):
+        """
+        Non-destructive evaluation. Save ALL state, run inference, restore.
+        Default n_relax is 10 (enough ticks for bonds to drive teach slots up
+        from zero). Explicit n_relax arg always overrides.
+
+        domain_lo/domain_hi: restrict the argmax to slots [domain_lo:domain_hi].
+        Required for any multi-domain checkpoint — without it the argmax ranges
+        over EVERY class slot (e.g. all 310 lifetime slots), so a later-trained
+        domain can out-compete the correct slot and a 'retention' drop conflates
+        forgetting with inter-domain competition. The returned scores are the
+        full unmasked vector; only the argmax is restricted.
+        """
+        if n_relax is None:
+            n_relax = 10
+        # Save complete state
+        save = {
+            's': self.s.clone(),
+            's_imag': self.s_imag.clone(),
+            'state_id': self.state_id.clone(),
+            'phase_vec': self.phase_vec.clone(),
+            'gamma': self.gamma.clone(),
+            'proper_time': self.proper_time.clone(),
+            'branch_weights': self.branch_weights.clone(),
+            'future_prediction': self.future_prediction.clone(),
+            '_prev_prediction': self._prev_prediction.clone(),
+            'force_channels': self.force_channels.clone(),
+            'scale_memory': self.scale_memory.clone(),
+            'vacuum_energy': self.vacuum_energy.clone(),
+            '_prev_mag': self._prev_mag.clone() if self._prev_mag is not None else None,
+            '_prev_s': self._prev_s.clone() if self._prev_s is not None else None,
+            'local_T': self.local_T.clone(),
+            'local_v2c2': self.local_v2c2.clone(),
+            'local_w': self.local_w.clone(),
+            '_E_history': self._E_history.clone(),
+            's_branches': self.s_branches.clone(),
+            'state_weights': self.state_weights.clone(),
+            '_input_running_mean': self._input_running_mean.clone() if self._input_running_mean is not None else None,
+            '_input_running_var': self._input_running_var.clone(),
+            '_last_birth_step': self._last_birth_step,
+            '_valence_accumulator': self._valence_accumulator.clone(),
+            '_valence_count': self._valence_count.clone(),
+        }
+
+        # Device safety: ensure input is on same device as model
+        x = x.to(self.device)
+
+        # State-dependent decay. Apply the same input-resonance gate that
+        # experience() uses, so eval recreates the sparse, pattern-specific
+        # activation the bonds were trained against.
+        x = x / x.norm().clamp(min=1e-6)
+        interior = self.alive_mask & ~self._is_sensory & ~self._is_teaching
+        if interior.any():
+            cr = self.crystallized()
+
+            if self.input_dim is not None:
+                input_sig = (x.unsqueeze(-1) * self.c[:self.input_dim]).sum(0)
+                input_sig = input_sig / input_sig.norm().clamp(min=1e-6)
+                resonance = (self.c * input_sig.unsqueeze(0)).sum(-1)
+                gate = 0.3 + 0.7 * (resonance.clamp(-1, 1) + 1) / 2
+            else:
+                gate = torch.ones(self.n_max, device=self.device)
+
+            # Eq 5 dissipation — STATE-SPECIFIC, same as experience() (each
+            # regime's own loss law), so inference and training match.
+            _decay_ctx = self._build_routing_ctx()
+            decay_factor = self.eq5_decay_factor(ctx=_decay_ctx)
+            # Gate and clamp FIRST, then lock/crystal preservation as the FINAL
+            # word (otherwise the gate multiply would undo the lock and
+            # consolidated memory would decay during eval, weakening readout).
+            decay_factor = (decay_factor * gate).clamp(0.1, 0.99)
+            decay_factor = torch.where(cr, torch.ones_like(decay_factor) * 0.98,
+                                       decay_factor)
+            decay_factor = torch.where(self._class_locked,
+                                       torch.ones_like(decay_factor),
+                                       decay_factor)
+            self.s[interior] *= decay_factor[interior].unsqueeze(-1)
+
+        # CRITICAL FIX: Reset teaching slots to ZERO before eval.
+        # During training, teaching slots are PINNED to the target.
+        # During eval, they must be DRIVEN by bonds from interior.
+        # If we don't reset them, they retain the last training pin value
+        # and the argmax always returns the last-trained class.
+        if self.t_start is not None:
+            self.s[self.t_start:self.t_end] = 0.0
+
+        if self.input_dim is not None:
+            self.s[:self.input_dim] = x.unsqueeze(-1) * self.c[:self.input_dim]
+
+        pin_s = self.s[:self.input_dim].clone() if self.input_dim else None
+        ctx = self._build_routing_ctx()
+
+        # More relaxation ticks for eval (bonds need time to drive teaching)
+        for tick in range(n_relax):
+            self._dynamics_step(ctx, pin_sensory=pin_s, pin_teaching=None,
+                                bond_chunk=bond_chunk)
+            # Refresh context midway
+            if tick == n_relax // 2:
+                ctx = self._build_routing_ctx()
+
+        _fn   = predict_fn if predict_fn is not None else self.predict
+        scores = _fn()
+        if scores is None:
+            result = -1
+        elif domain_lo is not None and domain_hi is not None:
+            masked = scores.clone()
+            keep = torch.zeros_like(masked, dtype=torch.bool)
+            keep[domain_lo:domain_hi] = True
+            masked = masked.masked_fill(~keep, float('-inf'))
+            result = int(masked.argmax())
+        else:
+            result = int(scores.argmax())
+        scores_out = scores.clone() if (return_scores and scores is not None) else None
+
+        # Restore everything
+        for attr, val in save.items():
+            if val is not None:
+                setattr(self, attr, val)
+
+        if return_scores:
+            return result, scores_out
+        return result
+
+    def eval_predict_aware(self, x, n_relax=None, domain_lo=None, domain_hi=None):
+        """Non-destructive aware prediction with internal confidence signals.
+
+        Uses predict_aware() (magnitude × holo gate) and captures the brain's
+        internal contradiction level after relaxation — before state is restored.
+        This is the 'knows what it knows' readout: the brain reports its own
+        confidence, not just a class label.
+
+        Returns:
+            pred   : int class index (domain-restricted if lo/hi provided)
+            scores : (n_classes,) aware score tensor
+            meta   : dict with contradiction, ach, holo_mean, field_confidence
+        """
+        if n_relax is None:
+            n_relax = 10
+
+        pred_raw, scores = self.eval_predict(
+            x, n_relax=n_relax, return_scores=True,
+            predict_fn=self.predict_aware)
+
+        # eval_predict restored state — re-run to capture internal signals.
+        # Use same save/restore pattern but only need field state after relax.
+        with torch.no_grad():
+            save_s = self.s.clone()
+            x = x.to(self.device)
+            x = x / x.norm().clamp(min=1e-6)
+            if self.input_dim is not None:
+                self.s[:self.input_dim] = x.unsqueeze(-1) * self.c[:self.input_dim]
+            if self.t_start is not None:
+                self.s[self.t_start:self.t_end] = 0.0
+            pin_s = self.s[:self.input_dim].clone() if self.input_dim else None
+            ctx = self._build_routing_ctx()
+            for tick in range(n_relax):
+                self._dynamics_step(ctx, pin_sensory=pin_s, pin_teaching=None)
+                if tick == n_relax // 2:
+                    ctx = self._build_routing_ctx()
+
+            # Capture internal signals from settled field
+            contradiction = float(self._contradiction())
+            holo_mean = 0.0
+            if self._holo_projector is not None and self.t_start is not None:
+                ts = self.s[self.t_start:self.t_end]
+                nr = ts.norm(dim=-1).clamp(min=1e-8)
+                ha = (ts @ self._holo_projector * ts).sum(-1) / (nr ** 2)
+                holo_mean = float(ha.clamp(0, 1).mean())
+
+            self.s = save_s  # restore
+
+        ach  = self._neuro.get('ach', 1.0)
+        novelty = max(0.0, min(1.0, (ach - 1.0) / 0.5))
+        field_confidence = (1.0 - min(1.0, contradiction)) * (1.0 - 0.5 * novelty)
+
+        if domain_lo is not None and domain_hi is not None and scores is not None:
+            sub  = scores[domain_lo:domain_hi]
+            pred = int(sub.argmax()) + domain_lo
+        else:
+            pred = pred_raw
+
+        meta = {
+            'contradiction':    round(contradiction, 4),
+            'ach':              round(ach, 4),
+            'holo_mean':        round(holo_mean, 4),
+            'novelty':          round(novelty, 4),
+            'field_confidence': round(field_confidence, 4),
+        }
+        return pred, scores, meta
+
+
+# Attach experience methods
+for _m in ('experience', 'predict', 'predict_aware',
+           'eval_predict', 'eval_predict_aware'):
+    setattr(UERFField, _m, getattr(UERFExperience, _m))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PART 6 — CHECKPOINT / SAVE / RESUME
+# ═══════════════════════════════════════════════════════════════════════════════
+class UERFCheckpoint:
+    """Save/load the entire brain state."""
+
+    SAVE_ATTRS = (
+        # config
+        'n_max', 'd', 'input_dim', 'n_classes', 't_start', 't_end',
+        '_holo_area_limit',
+        'experience_count', 'births', 'deaths', 'crystallization_events',
+        # identity tensors
+        'theta', 'S', 'f', 'N', 'a0', 'age', 'alive_mask',
+        # state
+        's', 's_imag', 'c', 'phase_vec', 'state_id',
+        # bonds
+        'C', 'C_mask',
+        # slot tags
+        '_is_sensory', '_is_teaching',
+        # holographic
+        '_holo_projector',
+        # auxiliary state variables
+        'proper_time', 'gamma', 'branch_weights', 'future_prediction',
+        '_prev_prediction',
+        'force_channels', 'scale_memory', 'vacuum_energy',
+        '_prev_mag', '_prev_s',
+        # routing cache
+        'state_weights',
+        # input novelty tracking
+        '_input_running_mean', '_input_running_var',
+        # local physics, cross-state coupling, parallel branches
+        'local_T', 'local_v2c2', 'local_w', '_E_history',
+        'C_states', 's_branches',
+        # birth refractory + crystallization
+        '_last_birth_step',
+        '_valence_accumulator', '_valence_count',
+        '_crystallization_threshold',
+        '_teach_bond_count',
+        # neuromodulation
+        'neuro_enabled', '_neuro', '_mean_valence_prev',
+        # native full-field readout catalog
+        # readout calibration + template heads (used at inference; must persist
+        # or a resumed brain silently reverts to a different readout)
+        # neurogenesis refractory
+        '_last_grow_step',
+        # graded consolidation strength (vacuum forget/recall memory)
+        '_preservation',
+        # emergent-category count
+        '_active_categories',
+        # concept-relation web (understanding)
+        '_concept_bonds',
+    )
+
+    def save_checkpoint(self, path):
+        """Save full brain state to a .pt file."""
+        ckpt = {}
+        for attr in UERFCheckpoint.SAVE_ATTRS:
+            v = getattr(self, attr, None)
+            if v is None:
+                ckpt[attr] = None
+            elif isinstance(v, torch.Tensor):
+                ckpt[attr] = v.detach().cpu().clone()
+            else:
+                ckpt[attr] = v
+        # (no replay buffer to save — physics-only memory)
+        # Save teach bond accumulators
+        if self._teach_bond_sum is not None:
+            ckpt['_teach_bond_sum'] = self._teach_bond_sum.detach().cpu().clone()
+        ckpt['_teach_bond_count'] = self._teach_bond_count.detach().cpu().clone()
+        # Save class lock state
+        ckpt['_class_locked'] = self._class_locked.detach().cpu().clone()
+        ckpt['_locked_class'] = self._locked_class.detach().cpu().clone()
+        torch.save(ckpt, path)
+        return path
+
+    @staticmethod
+    def load_checkpoint(path, device=None):
+        """Reconstruct a UERFField from a checkpoint."""
+        dev = device or DEVICE
+        ckpt = torch.load(path, map_location='cpu', weights_only=False)
+        f = UERFField(
+            n_max=ckpt['n_max'],
+            n_initial=1,
+            d=ckpt['d'],
+            input_dim=ckpt['input_dim'],
+            n_classes=ckpt['n_classes'],
+            device=dev,
+        )
+        for attr in UERFCheckpoint.SAVE_ATTRS:
+            v = ckpt.get(attr, None)
+            if isinstance(v, torch.Tensor):
+                setattr(f, attr, v.to(dev))
+            elif v is not None:
+                setattr(f, attr, v)
+        # (replay buffer removed — any legacy '_replay_per_class' in an old
+        #  checkpoint is intentionally ignored)
+        # Restore teach bond accumulators
+        if '_teach_bond_sum' in ckpt and ckpt['_teach_bond_sum'] is not None:
+            f._teach_bond_sum = ckpt['_teach_bond_sum'].to(dev)
+        if '_teach_bond_count' in ckpt:
+            f._teach_bond_count = ckpt['_teach_bond_count'].to(dev)
+        # Restore class locks
+        if '_class_locked' in ckpt:
+            f._class_locked = ckpt['_class_locked'].to(dev)
+        if '_locked_class' in ckpt:
+            f._locked_class = ckpt['_locked_class'].to(dev)
+        # Backward-compat: checkpoints saved before the complex amplitude existed
+        # have no s_imag. The new dynamics read it every tick, so guarantee it —
+        # zero phase (s_imag=0 ⇒ purely classical) is the correct default.
+        if not isinstance(getattr(f, 's_imag', None), torch.Tensor) or \
+                f.s_imag.shape != f.s.shape:
+            f.s_imag = torch.zeros_like(f.s)
+        return f
+
+
+# Attach checkpoint methods
+for _m in ('save_checkpoint',):
+    setattr(UERFField, _m, getattr(UERFCheckpoint, _m))
+UERFField.load_checkpoint = staticmethod(UERFCheckpoint.load_checkpoint)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MODULE-LEVEL EXPORTS
+# ═══════════════════════════════════════════════════════════════════════════════
+__all__ = [
+    'UERFField', 'SensoryProjection', 'DEVICE', 'STATE_NAMES',
+    'S_CLASSICAL', 'S_TOROIDAL', 'S_HARMONIC', 'S_HOLOGRAPHIC', 'S_PHANTOM',
+    'S_THERMAL', 'S_RELATIVISTIC', 'S_VACUUM', 'S_FRACTAL', 'S_MULTIVERSAL',
+    'S_RETROCAUSAL', 'S_HOLOADS', 'S_CUBIT', 'S_ELEMENTAL', 'S_QUANTUM',
+    'S_QUBIT', 'S_TEMPORAL', 'S_CONSCIOUSNESS',
+    'ALPHA_RANGES', 'alpha_for_state', 'alpha_core', 'valence',
+]

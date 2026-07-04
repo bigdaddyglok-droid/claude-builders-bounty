@@ -1,0 +1,420 @@
+{
+  "kaggle/phase1-step6000": {
+    "label": "kaggle/phase1-step6000",
+    "domain": [
+      0,
+      10
+    ],
+    "n_max": 800,
+    "input_dim": 128,
+    "n_classes": 310,
+    "exp": 6000,
+    "fixes": {
+      "fix1": true,
+      "fix2": true,
+      "fix3": true,
+      "fix4": true,
+      "fix5": true,
+      "fix6": true
+    },
+    "neuro_enabled": false,
+    "neuro_levels": {},
+    "replay_entries": 0,
+    "replay_disabled_for_eval": true,
+    "mean_source": "_teach_bond_sum",
+    "classes_with_memory": 10,
+    "n_sensory_cfg": 128,
+    "input_dim_matches_cfg": true,
+    "n_eval": 2000,
+    "brain_predict_full310": 37.75,
+    "brain_predict_masked": 37.75,
+    "reconstructed_matched_filter": 74.25,
+    "whitened_mahalanobis": {
+      "ridge_0.001": 83.25,
+      "ridge_0.01": 83.45,
+      "ridge_0.1": 84.15,
+      "ridge_0.5": 85.4
+    },
+    "best_whitened": 85.4
+  },
+  "kaggle/phase1-emergent-step4000": {
+    "label": "kaggle/phase1-emergent-step4000",
+    "domain": [
+      0,
+      10
+    ],
+    "n_max": 800,
+    "input_dim": 128,
+    "n_classes": 310,
+    "exp": 4000,
+    "fixes": {
+      "fix1": true,
+      "fix2": true,
+      "fix3": true,
+      "fix4": true,
+      "fix5": true,
+      "fix6": true
+    },
+    "neuro_enabled": false,
+    "neuro_levels": {},
+    "replay_entries": 0,
+    "replay_disabled_for_eval": true,
+    "mean_source": "_teach_bond_sum",
+    "classes_with_memory": 10,
+    "n_sensory_cfg": 128,
+    "input_dim_matches_cfg": true,
+    "n_eval": 2000,
+    "brain_predict_full310": 28.85,
+    "brain_predict_masked": 28.85,
+    "reconstructed_matched_filter": 73.55,
+    "whitened_mahalanobis": {
+      "ridge_0.001": 81.15,
+      "ridge_0.01": 82.1,
+      "ridge_0.1": 84.2,
+      "ridge_0.5": 85.7
+    },
+    "best_whitened": 85.7
+  },
+  "kaggle/phase1-emergent-step8000": {
+    "label": "kaggle/phase1-emergent-step8000",
+    "domain": [
+      0,
+      10
+    ],
+    "n_max": 1152,
+    "input_dim": 128,
+    "n_classes": 310,
+    "exp": 8000,
+    "fixes": {
+      "fix1": true,
+      "fix2": true,
+      "fix3": true,
+      "fix4": true,
+      "fix5": true,
+      "fix6": true
+    },
+    "neuro_enabled": false,
+    "neuro_levels": {},
+    "replay_entries": 0,
+    "replay_disabled_for_eval": true,
+    "mean_source": "_teach_bond_sum",
+    "classes_with_memory": 10,
+    "n_sensory_cfg": 128,
+    "input_dim_matches_cfg": true,
+    "n_eval": 2000,
+    "brain_predict_full310": 28.8,
+    "brain_predict_masked": 28.8,
+    "reconstructed_matched_filter": 73.65,
+    "whitened_mahalanobis": {
+      "ridge_0.001": 82.25,
+      "ridge_0.01": 82.9,
+      "ridge_0.1": 84.9,
+      "ridge_0.5": 86.1
+    },
+    "best_whitened": 86.1
+  },
+  "kaggle/phase1-emergent-complete": {
+    "label": "kaggle/phase1-emergent-complete",
+    "domain": [
+      0,
+      10
+    ],
+    "n_max": 1152,
+    "input_dim": 128,
+    "n_classes": 310,
+    "exp": 10000,
+    "fixes": {
+      "fix1": true,
+      "fix2": true,
+      "fix3": true,
+      "fix4": true,
+      "fix5": true,
+      "fix6": true
+    },
+    "neuro_enabled": false,
+    "neuro_levels": {},
+    "replay_entries": 0,
+    "replay_disabled_for_eval": true,
+    "mean_source": "_teach_bond_sum",
+    "classes_with_memory": 10,
+    "n_sensory_cfg": 128,
+    "input_dim_matches_cfg": true,
+    "n_eval": 2000,
+    "brain_predict_full310": 28.85,
+    "brain_predict_masked": 28.85,
+    "reconstructed_matched_filter": 73.7,
+    "whitened_mahalanobis": {
+      "ridge_0.001": 82.4,
+      "ridge_0.01": 83.05,
+      "ridge_0.1": 84.75,
+      "ridge_0.5": 85.7
+    },
+    "best_whitened": 85.7
+  },
+  "kaggle/phase1-complete": {
+    "label": "kaggle/phase1-complete",
+    "domain": [
+      0,
+      10
+    ],
+    "n_max": 800,
+    "input_dim": 128,
+    "n_classes": 310,
+    "exp": 10000,
+    "fixes": {
+      "fix1": true,
+      "fix2": true,
+      "fix3": true,
+      "fix4": true,
+      "fix5": true,
+      "fix6": true
+    },
+    "neuro_enabled": false,
+    "neuro_levels": {},
+    "replay_entries": 0,
+    "replay_disabled_for_eval": true,
+    "mean_source": "_teach_bond_sum",
+    "classes_with_memory": 10,
+    "n_sensory_cfg": 128,
+    "input_dim_matches_cfg": true,
+    "n_eval": 2000,
+    "brain_predict_full310": 38.75,
+    "brain_predict_masked": 38.75,
+    "reconstructed_matched_filter": 74.4,
+    "whitened_mahalanobis": {
+      "ridge_0.001": 82.95,
+      "ridge_0.01": 83.2,
+      "ridge_0.1": 84.85,
+      "ridge_0.5": 85.55
+    },
+    "best_whitened": 85.55
+  },
+  "hf/emergent_main": {
+    "label": "hf/emergent_main",
+    "domain": [
+      0,
+      10
+    ],
+    "n_max": 800,
+    "input_dim": 128,
+    "n_classes": 310,
+    "exp": 4000,
+    "fixes": {
+      "fix1": true,
+      "fix2": true,
+      "fix3": true,
+      "fix4": true,
+      "fix5": true,
+      "fix6": true
+    },
+    "neuro_enabled": false,
+    "neuro_levels": {},
+    "replay_entries": 0,
+    "replay_disabled_for_eval": true,
+    "mean_source": "_teach_bond_sum",
+    "classes_with_memory": 10,
+    "n_sensory_cfg": 128,
+    "input_dim_matches_cfg": true,
+    "n_eval": 2000,
+    "brain_predict_full310": 28.85,
+    "brain_predict_masked": 28.85,
+    "reconstructed_matched_filter": 73.55,
+    "whitened_mahalanobis": {
+      "ridge_0.001": 81.15,
+      "ridge_0.01": 82.1,
+      "ridge_0.1": 84.2,
+      "ridge_0.5": 85.7
+    },
+    "best_whitened": 85.7
+  },
+  "hf/emv2_main": {
+    "label": "hf/emv2_main",
+    "domain": [
+      0,
+      10
+    ],
+    "n_max": 1152,
+    "input_dim": 128,
+    "n_classes": 310,
+    "exp": 10000,
+    "fixes": {
+      "fix1": true,
+      "fix2": true,
+      "fix3": true,
+      "fix4": true,
+      "fix5": true,
+      "fix6": true
+    },
+    "neuro_enabled": false,
+    "neuro_levels": {},
+    "replay_entries": 0,
+    "replay_disabled_for_eval": true,
+    "mean_source": "_teach_bond_sum",
+    "classes_with_memory": 10,
+    "n_sensory_cfg": 128,
+    "input_dim_matches_cfg": true,
+    "n_eval": 2000,
+    "brain_predict_full310": 28.85,
+    "brain_predict_masked": 28.85,
+    "reconstructed_matched_filter": 73.7,
+    "whitened_mahalanobis": {
+      "ridge_0.001": 82.4,
+      "ridge_0.01": 83.05,
+      "ridge_0.1": 84.75,
+      "ridge_0.5": 85.7
+    },
+    "best_whitened": 85.7
+  },
+  "hf/phase2_main": {
+    "label": "hf/phase2_main",
+    "domain": [
+      0,
+      10
+    ],
+    "n_max": 800,
+    "input_dim": 128,
+    "n_classes": 310,
+    "exp": 40000,
+    "fixes": {
+      "fix1": true,
+      "fix2": true,
+      "fix3": true,
+      "fix4": true,
+      "fix5": true,
+      "fix6": true
+    },
+    "neuro_enabled": false,
+    "neuro_levels": {},
+    "replay_entries": 0,
+    "replay_disabled_for_eval": true,
+    "mean_source": "_teach_bond_sum",
+    "classes_with_memory": 10,
+    "n_sensory_cfg": 128,
+    "input_dim_matches_cfg": true,
+    "n_eval": 2000,
+    "brain_predict_full310": 38.5,
+    "brain_predict_masked": 38.75,
+    "reconstructed_matched_filter": 74.4,
+    "whitened_mahalanobis": {
+      "ridge_0.001": 82.95,
+      "ridge_0.01": 83.2,
+      "ridge_0.1": 84.85,
+      "ridge_0.5": 85.55
+    },
+    "best_whitened": 85.55
+  },
+  "hf/phase3_progress": {
+    "label": "hf/phase3_progress",
+    "domain": [
+      0,
+      10
+    ],
+    "n_max": 800,
+    "input_dim": 128,
+    "n_classes": 310,
+    "exp": 80000,
+    "fixes": {
+      "fix1": true,
+      "fix2": true,
+      "fix3": true,
+      "fix4": true,
+      "fix5": true,
+      "fix6": true
+    },
+    "neuro_enabled": false,
+    "neuro_levels": {},
+    "replay_entries": 0,
+    "replay_disabled_for_eval": true,
+    "mean_source": "_teach_bond_sum",
+    "classes_with_memory": 10,
+    "n_sensory_cfg": 128,
+    "input_dim_matches_cfg": true,
+    "n_eval": 2000,
+    "brain_predict_full310": 38.5,
+    "brain_predict_masked": 38.75,
+    "reconstructed_matched_filter": 74.4,
+    "whitened_mahalanobis": {
+      "ridge_0.001": 82.95,
+      "ridge_0.01": 83.2,
+      "ridge_0.1": 84.85,
+      "ridge_0.5": 85.55
+    },
+    "best_whitened": 85.55
+  },
+  "hf/pl1done_main": {
+    "label": "hf/pl1done_main",
+    "domain": [
+      0,
+      10
+    ],
+    "n_max": 800,
+    "input_dim": 128,
+    "n_classes": 310,
+    "exp": 10000,
+    "fixes": {
+      "fix1": true,
+      "fix2": true,
+      "fix3": true,
+      "fix4": true,
+      "fix5": true,
+      "fix6": true
+    },
+    "neuro_enabled": false,
+    "neuro_levels": {},
+    "replay_entries": 0,
+    "replay_disabled_for_eval": true,
+    "mean_source": "_teach_bond_sum",
+    "classes_with_memory": 10,
+    "n_sensory_cfg": 128,
+    "input_dim_matches_cfg": true,
+    "n_eval": 2000,
+    "brain_predict_full310": 38.75,
+    "brain_predict_masked": 38.75,
+    "reconstructed_matched_filter": 74.4,
+    "whitened_mahalanobis": {
+      "ridge_0.001": 82.95,
+      "ridge_0.01": 83.2,
+      "ridge_0.1": 84.85,
+      "ridge_0.5": 85.55
+    },
+    "best_whitened": 85.55
+  },
+  "hf/phase3_main": {
+    "label": "hf/phase3_main",
+    "domain": [
+      0,
+      10
+    ],
+    "n_max": 800,
+    "input_dim": 128,
+    "n_classes": 310,
+    "exp": 80000,
+    "fixes": {
+      "fix1": true,
+      "fix2": true,
+      "fix3": true,
+      "fix4": true,
+      "fix5": true,
+      "fix6": true
+    },
+    "neuro_enabled": false,
+    "neuro_levels": {},
+    "replay_entries": 0,
+    "replay_disabled_for_eval": true,
+    "mean_source": "_teach_bond_sum",
+    "classes_with_memory": 10,
+    "n_sensory_cfg": 128,
+    "input_dim_matches_cfg": true,
+    "n_eval": 2000,
+    "brain_predict_full310": 38.5,
+    "brain_predict_masked": 38.75,
+    "reconstructed_matched_filter": 74.4,
+    "whitened_mahalanobis": {
+      "ridge_0.001": 82.95,
+      "ridge_0.01": 83.2,
+      "ridge_0.1": 84.85,
+      "ridge_0.5": 85.55
+    },
+    "best_whitened": 85.55
+  }
+}

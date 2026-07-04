@@ -1,0 +1,14 @@
+{
+  "id": "blackloko/uerf-phase-1-mnist-emergent-physics-comparison",
+  "title": "UERF Phase 1 MNIST — Emergent Physics Comparison",
+  "code_file": "uerf_phase1_emergent.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}
